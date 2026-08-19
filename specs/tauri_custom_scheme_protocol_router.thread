@@ -1,0 +1,59 @@
+syntax = component
+
+Component: "Tauri Custom Scheme Protocol Router"
+  Note: [[The Tauri Custom Scheme Protocol Router registers and handles the custom paper-plugin:// URI scheme. 
+  It intercepts HTTP requests from the Webview, validates paths to block directory traversal attacks, maps requests 
+  to the plugin's local directory, and streams static assets (widget.js, styles.css) securely to the browser context.]]
+
+  Diagram: "classDiagram" [[
+    class CustomSchemeRouter {
+      +handle_scheme_request(request: SchemeRequest) -> SchemeResponse
+      +validate_uri_path(path: String) -> Boolean
+    }
+  ]]
+
+  Invariants:
+    * "All custom scheme requests must resolve files strictly within the matching plugin folder directory."
+    * "Requests containing parent directory sequences (e.g. '..') must be immediately blocked."
+
+  Non-Functional:
+    * "Resource loads must support HTTP range queries and pipe byte streams directly without memory buffering."
+
+  Models:
+    Model: "SchemeRequest"
+      Type: "Struct"
+      Members:
+        * "uri: String - Full URI path (e.g. 'paper-plugin://my-plugin-id/widget.js')"
+        * "method: String - HTTP request method"
+
+    Model: "SchemeResponse"
+      Type: "Struct"
+      Members:
+        * "status: uint32 - HTTP status code"
+        * "mime_type: String - File MIME content type"
+        * "content_stream: Bytes - Stream pointer of binary files data"
+
+  Contracts:
+    Contract: "HandleSchemeRequest"
+      Signature: "+handle_scheme_request(request: SchemeRequest) -> SchemeResponse"
+      Inputs:
+        * "request: SchemeRequest - Intercepted scheme URI details"
+      Outputs:
+        * "response: SchemeResponse - Static asset data or access denied status"
+      Requires:
+        * "Tauri custom protocol registration is initialized."
+      Ensures:
+        * "The requested asset is resolved and streamed back securely."
+      Precondition:
+        * "The request.uri must begin with 'paper-plugin://'."
+      Postcondition:
+        * "No files outside the registered plugins folder can be read."
+      Process:
+        1. "Extract plugin_id and relative asset path from request.uri."
+        2. "Validate relative path by calling validate_uri_path."
+        3. "If path validation fails, return SchemeResponse with status=403 (Forbidden)."
+        4. "Resolve absolute file path: parent_plugins_dir / plugin_id / asset_path."
+        5. "If file does not exist, return SchemeResponse with status=404 (Not Found)."
+        6. "Determine MIME type based on file extension (e.g. text/javascript for .js)."
+        7. "Open asynchronous file read handle and pipe stream contents."
+        8. "Return SchemeResponse with status=200, mime_type, and stream contents."

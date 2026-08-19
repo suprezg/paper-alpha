@@ -1,0 +1,88 @@
+syntax = component
+
+Component: "Registry"
+  Note: [[The Registry is an in-memory, thread-safe central metadata store implemented via concurrent hashmaps. 
+  It stores active configurations, plugin registration states, active subscription topic counts, and global context variables. 
+  The Registry does not store, buffer, or cache high-frequency data streams.]]
+
+  Diagram: "classDiagram" [[
+    class Registry {
+      +get_context(key: String) -> OptionValue
+      +set_context(key: String, value: OptionValue) -> Result
+      +register_plugin(plugin: PluginMetadata) -> Result
+      +unregister_plugin(plugin_id: String) -> Result
+      +get_plugin(plugin_id: String) -> OptionPlugin
+    }
+  ]]
+
+  Invariants:
+    * "All registered plugins must possess a unique plugin_id."
+    * "Global context variables must represent lightweight data structures and never store sequence tick streams."
+
+  Non-Functional:
+    * "Read access to context variables must be lock-free and execute in under 1 microsecond."
+    * "Concurrently writing to unrelated context keys must not lock the registry map."
+
+  Models:
+    Model: "PluginMetadata"
+      Type: "Struct"
+      Members:
+        * "plugin_id: String - Unique name of the plugin"
+        * "instance_id: String - Ephemeral instance token"
+        * "category: String - DataFeed, Logic, or Broker"
+        * "is_enabled: Boolean - Active state toggle status"
+        * "secure_vars_mapping: Map<String, String> - Reference names mapping to opaque key reference tokens"
+
+    Model: "OptionValue"
+      Type: "Struct"
+      Members:
+        * "value: Struct - Serialized JSON-compatible dynamic context value payload"
+
+    Model: "OptionPlugin"
+      Type: "Enum"
+      Members:
+        * "Some(PluginMetadata) - Active metadata details"
+        * "None - Matching entry not found status"
+
+  Contracts:
+    Contract: "SetContext"
+      Signature: "+set_context(key: String, value: OptionValue) -> Result"
+      Inputs:
+        * "key: String - The identifier for the global variable (e.g. 'ActiveAsset')"
+        * "value: OptionValue - The context payload to assign"
+      Outputs:
+        * "result: Result - Success void or failure state"
+      Requires:
+        * "The caller must hold write authorization from the Registry manager."
+      Ensures:
+        * "The in-memory context mapping for key is updated to contain the new value."
+      Precondition:
+        * "The key name must not be empty or contain non-ASCII characters."
+      Postcondition:
+        * "A lookup for the key immediately returns the newly assigned value."
+      Process:
+        1. "Lock the write segment of the dashmap for the specified key."
+        2. "Write value to the key slot."
+        3. "Unlock the write segment."
+        4. "Trigger the Router context update dispatch thread."
+        5. "Return Result::Ok."
+
+    Contract: "RegisterPlugin"
+      Signature: "+register_plugin(plugin: PluginMetadata) -> Result"
+      Inputs:
+        * "plugin: PluginMetadata - Struct containing plugin properties"
+      Outputs:
+        * "result: Result - Registration status"
+      Requires:
+        * "The plugin package must have passed structural manifest validation."
+      Ensures:
+        * "The plugin metadata is loaded into the active registry map."
+      Precondition:
+        * "The plugin_id must not conflict with an already registered plugin."
+      Postcondition:
+        * "The plugin is marked active and is queryable by the Router."
+      Process:
+        1. "Check if plugin.plugin_id already exists in the registry map."
+        2. "If exists, return Result::Err(DuplicatePluginId)."
+        3. "Insert the plugin metadata into the registry map."
+        4. "Return Result::Ok."

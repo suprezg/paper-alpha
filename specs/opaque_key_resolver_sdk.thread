@@ -1,0 +1,56 @@
+syntax = component
+
+Component: "Opaque Key Resolver SDK"
+  Note: [[The Opaque Key Resolver SDK is a platform-linked client library running within the plugin process. 
+  It intercepts calls containing ApiKeyRef handles. Right before writing bytes to outbound TCP sockets, it queries 
+  the Core secure database via local IPC to resolve the actual credential, injecting it directly into the outbound 
+  network stream buffer so that the raw key never enters developer-facing code.]]
+
+  Diagram: "classDiagram" [[
+    class KeyResolverSdk {
+      +resolve_ref_variable(ref: ApiKeyRef) -> DecryptedKeyBytes
+      +intercept_socket_stream(ref: ApiKeyRef, stream_buffer: Bytes) -> Bytes
+    }
+  ]]
+
+  Invariants:
+    * "The raw key string decrypted from Core must exist only inside transient memory buffers at the socket write level."
+    * "The raw key string must never be returned to the main thread of the plugin execution runtime."
+
+  Non-Functional:
+    * "Key resolution overhead over local IPC must execute in under 1 millisecond."
+
+  Models:
+    Model: "ApiKeyRef"
+      Type: "Struct"
+      Members:
+        * "reference_id: String - Unique uuid token mapped in Core"
+
+    Model: "DecryptedKeyBytes"
+      Type: "Struct"
+      Members:
+        * "raw_bytes: Pointer - Address of transient decrypted byte buffer in RAM"
+
+  Contracts:
+    Contract: "InterceptSocketStream"
+      Signature: "+intercept_socket_stream(ref: ApiKeyRef, stream_buffer: Bytes) -> Bytes"
+      Inputs:
+        * "ref: ApiKeyRef - The variable reference handle"
+        * "stream_buffer: Bytes - Outbound network request bytes before serialization"
+      Outputs:
+        * "final_stream: Bytes - Buffer bytes containing resolved credentials"
+      Requires:
+        * "Local UDS/Named Pipe connection to Core is established."
+      Ensures:
+        * "The reference handle in header slot is replaced by raw key bytes."
+      Precondition:
+        * "The reference_id must be mapped in the plugin secure environment table."
+      Postcondition:
+        * "The returned buffer is ready for transmission over raw TCP socket."
+      Process:
+        1. "Query Core secure vault via local gRPC IPC using ref.reference_id."
+        2. "Core verifies plugin access control rights."
+        3. "Core returns decrypted raw key bytes over the local IPC channel."
+        4. "Writers swap reference placeholder bytes inside stream_buffer with decrypted key bytes."
+        5. "Wipe key bytes from local resolver memory variables immediately."
+        6. "Return modified stream_buffer."

@@ -1,0 +1,72 @@
+syntax = component
+
+Component: "RAF UI Frame Buffer Coordinator"
+  Note: [[The RAF UI Frame Buffer Coordinator buffers high-frequency streaming events in UI client memory. 
+  Using the browser's requestAnimationFrame (RAF) API, it flushes the cumulative buffer and triggers a single UI 
+  redraw/repaint once every 16.6ms frame, eliminating browser layout freezes for high-rate streams (such as price ticks, news feeds, or coordinate tracks).]]
+
+  Diagram: "classDiagram" [[
+    class RafCoordinator {
+      +buffer_incoming_payload(payload: StreamPayload) -> Result
+      +flush_buffer_to_render_target() -> Result
+      +start_render_loop() -> Result
+    }
+  ]]
+
+  Invariants:
+    * "UI redraw actions must occur strictly during browser repaint frames."
+    * "The local render queue buffer must clear immediately after a frame paint executes."
+
+  Non-Functional:
+    * "The render loop must target a stable 60 FPS refresh rate."
+
+  Models:
+    Model: "StreamPayload"
+      Type: "Struct"
+      Members:
+        * "topic: String - Target stream channel identifier"
+        * "data: Struct - Arbitrary payload data structure"
+        * "timestamp_ms: uint64 - Creation timestamp millis"
+
+  Contracts:
+    Contract: "BufferIncomingPayload"
+      Signature: "+buffer_incoming_payload(payload: StreamPayload) -> Result"
+      Inputs:
+        * "payload: StreamPayload - Incoming data stream structure"
+      Outputs:
+        * "result: Result - Success or buffer overflow state"
+      Requires:
+        * "Client UI browser page is active."
+      Ensures:
+        * "The stream payload is appended to the local topic buffer queue."
+      Precondition:
+        * "The payload must contain a valid topic and non-empty data."
+      Postcondition:
+        * "The queue length increments by 1."
+      Process:
+        1. "Retrieve reference to client in-memory queue array matching payload.topic."
+        2. "Push payload element to the topic queue array."
+        3. "If array length exceeds memory safety threshold, shift out oldest element."
+        4. "Return Result::Ok."
+
+    Contract: "FlushBufferToRenderTarget"
+      Signature: "+flush_buffer_to_render_target() -> Result"
+      Inputs:
+        * "None"
+      Outputs:
+        * "result: Result - Flush completion status"
+      Requires:
+        * "Browser visual renderer or DOM update context is active."
+      Ensures:
+        * "All buffered payloads are flushed to their respective chart, table, or map render targets, and the queue is cleared."
+      Precondition:
+        * "The render loop callback is triggered by requestAnimationFrame."
+      Postcondition:
+        * "The local in-memory topic queue buffers are reset to empty."
+      Process:
+        1. "Identify active subscription widgets on screen."
+        2. "For each active widget, copy all current elements from the corresponding topic queue buffer."
+        3. "Clear the active topic queue buffers."
+        4. "Compute UI delta layouts using the copied payloads."
+        5. "Execute DOM / Canvas updates and repaint."
+        6. "Return Result::Ok."

@@ -1,0 +1,86 @@
+syntax = component
+
+Component: "Database"
+  Note: [[The Database is the central state persistence engine of the Core, utilizing SQLCipher (SQLite with AES-256-GCM encryption) and SQLx. 
+  It operates in Write-Ahead Logging (WAL) mode to allow concurrent non-blocking reads while all database writes are queued. 
+  It persists user profiles, configuration parameters, and context-specific query caches.]]
+
+  Diagram: "classDiagram" [[
+    class Database {
+      +initialize(key: EncryptionKey) -> Result
+      +execute_query(sql: String, params: QueryParams) -> QueryResult
+      +execute_write_async(command: WriteCommand) -> Result
+      +flush_writes() -> Result
+    }
+  ]]
+
+  Invariants:
+    * "The raw database file on disk must remain fully encrypted at rest using AES-256."
+    * "The database must operate in WAL mode at all times to allow concurrent reads during writes."
+
+  Non-Functional:
+    * "All write queries must execute off the main thread to prevent UI freezing."
+
+  Models:
+    Model: "WriteCommand"
+      Type: "Struct"
+      Members:
+        * "sql: String - The SQL query statement"
+        * "params: List<Bytes> - The serialized parameters bind value"
+
+    Model: "EncryptionKey"
+      Type: "Struct"
+      Members:
+        * "key_bytes: Bytes - 256-bit symmetric key bytes"
+
+    Model: "QueryParams"
+      Type: "Struct"
+      Members:
+        * "bindings: List<Bytes> - Parameters bound to placeholders"
+
+    Model: "QueryResult"
+      Type: "Struct"
+      Members:
+        * "rows: List<Struct> - List of returned data row representations"
+        * "rows_affected: uint64 - Count of rows modified by write operations"
+
+  Contracts:
+    Contract: "Initialize"
+      Signature: "+initialize(key: EncryptionKey) -> Result"
+      Inputs:
+        * "key: EncryptionKey - Derived credential from user password"
+      Outputs:
+        * "result: Result - Connection pool state status"
+      Requires:
+        * "Disk storage folder is accessible."
+      Ensures:
+        * "The SQLCipher encryption key is applied and the connection pool is open."
+      Precondition:
+        * "The key must be a valid 256-bit key structure."
+      Postcondition:
+        * "Read/write queries can be executed successfully against the database."
+      Process:
+        1. "Open connection pool to paper_alpha.db database file."
+        2. "Execute PRAGMA key command with key bytes."
+        3. "Execute PRAGMA journal_mode = WAL command."
+        4. "Run migration scripts to check table integrity."
+        5. "Return Result::Ok."
+
+    Contract: "ExecuteWriteAsync"
+      Signature: "+execute_write_async(command: WriteCommand) -> Result"
+      Inputs:
+        * "command: WriteCommand - SQL query and arguments"
+      Outputs:
+        * "result: Result - Enqueue verification status"
+      Requires:
+        * "Database queue channel is active."
+      Ensures:
+        * "The write command is placed into the asynchronous WAL write queue."
+      Precondition:
+        * "The SQL statement must be syntactically valid."
+      Postcondition:
+        * "The command is queued for execution on the background SQLite pool."
+      Process:
+        1. "Enqueue command into the tokio mpsc WAL channel."
+        2. "Notify background db worker pool of new task."
+        3. "Return Result::Ok."
