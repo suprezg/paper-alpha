@@ -1,0 +1,73 @@
+syntax = component
+
+Component: "Topic Subscription Ref-Counter"
+  Note: [[The Topic Subscription Ref-Counter keeps track of active subscriber counts for each stream topic. 
+  It uses atomic reference counters to trigger PauseStream and ResumeStream gRPC control commands to publishing 
+  plugins when widget subscriptions transition to or from zero, enabling core resource hibernation.]]
+
+  Diagram: "classDiagram" [[
+    class TopicRefCounter {
+      +increment_subscription(widget_id: String, topic: String) -> Result
+      +decrement_subscription(widget_id: String, topic: String) -> Result
+      +get_subscriber_count(topic: String) -> uint32
+    }
+  ]]
+
+  Invariants:
+    * "The subscriber count for any topic key must never drop below 0."
+    * "Pause and Resume commands must only be dispatched on transitions to 0 or 1 respectively."
+
+  Non-Functional:
+    * "Subscription count updates must execute atomically using AtomicUsize primitives to prevent race conditions."
+
+  Models:
+    Model: "TopicCount"
+      Type: "Struct"
+      Members:
+        * "topic: String - The target topic path"
+        * "ref_count: uint32 - Current active subscription count"
+
+  Contracts:
+    Contract: "IncrementSubscription"
+      Signature: "+increment_subscription(widget_id: String, topic: String) -> Result"
+      Inputs:
+        * "widget_id: String - The unmounting widget instance ID"
+        * "topic: String - Stream topic identifier"
+      Outputs:
+        * "result: Result - Increment execution status"
+      Requires:
+        * "The Router and gRPC socket client channels are active."
+      Ensures:
+        * "If ref_count transitions from 0 to 1, a ResumeStream signal is sent to the target publisher plugin."
+      Precondition:
+        * "The topic must represent a valid registered topic format."
+      Postcondition:
+        * "The ref_count for the topic is incremented by 1."
+      Process:
+        1. "Retrieve current ref_count for topic from the atomic storage map."
+        2. "Increment atomic count value."
+        3. "If old value was 0, lookup publishing plugin for topic."
+        4. "Send ResumeStream gRPC control signal to the publisher plugin."
+        5. "Return Result::Ok."
+
+    Contract: "DecrementSubscription"
+      Signature: "+decrement_subscription(widget_id: String, topic: String) -> Result"
+      Inputs:
+        * "widget_id: String - The unmounting widget instance ID"
+        * "topic: String - Stream topic identifier"
+      Outputs:
+        * "result: Result - Decrement execution status"
+      Requires:
+        * "The Router and gRPC socket client channels are active."
+      Ensures:
+        * "If ref_count transitions from 1 to 0, a PauseStream signal is sent to the target publisher plugin."
+      Precondition:
+        * "The current ref_count for the topic must be greater than 0."
+      Postcondition:
+        * "The ref_count for the topic is decremented by 1."
+      Process:
+        1. "Retrieve current ref_count for topic from the atomic storage map."
+        2. "Decrement atomic count value."
+        3. "If new value is 0, lookup publishing plugin for topic."
+        4. "Send PauseStream gRPC control signal to the publisher plugin."
+        5. "Return Result::Ok."

@@ -1,0 +1,60 @@
+syntax = component
+
+Component: "Plugin Directory Scanner and Validator"
+  Note: [[This component scans the local application directory for plugin folders at startup or on rescan triggers. 
+  It parses and validates each plugin's manifest.json file against structural specifications, registers compliant metadata, 
+  and displays warnings for corrupted packages.]]
+
+  Diagram: "classDiagram" [[
+    class PluginScanner {
+      +scan_directory(dir_path: String) -> List<PluginFolder>
+      +validate_manifest(manifest_path: String) -> ManifestValidationResult
+      +register_discovered_plugins(results: List<ManifestValidationResult>) -> Result
+    }
+  ]]
+
+  Invariants:
+    * "All validated plugins must include a parsed manifest.json file."
+    * "Any plugin failing validation must be locked and disabled in the UI."
+
+  Non-Functional:
+    * "Directory scans must be non-blocking and execute in a separate background thread."
+
+  Models:
+    Model: "ManifestValidationResult"
+      Type: "Struct"
+      Members:
+        * "plugin_id: String - Unique identifier found in manifest"
+        * "is_compliant: Boolean - Compliance status validation result"
+        * "manifest_data: Struct - Loaded configuration struct"
+        * "error_message: String - Error description details"
+
+    Model: "PluginFolder"
+      Type: "Struct"
+      Members:
+        * "folder_name: String - Directory folder name"
+        * "path: String - Absolute directory path"
+
+  Contracts:
+    Contract: "ValidateManifest"
+      Signature: "+validate_manifest(manifest_path: String) -> ManifestValidationResult"
+      Inputs:
+        * "manifest_path: String - Filepath of the target manifest.json"
+      Outputs:
+        * "result: ManifestValidationResult - Validation check details"
+      Requires:
+        * "Read access to the manifest file."
+      Ensures:
+        * "Returns validation compliance status and parses JSON contents."
+      Precondition:
+        * "The manifest file must exist and not be empty."
+      Postcondition:
+        * "Returned parsed metadata complies with the application schema format."
+      Process:
+        1. "Read raw JSON string from manifest_path."
+        2. "Deserialize string into Manifest struct using serde_json."
+        3. "If JSON is malformed, return ManifestValidationResult with is_compliant=false."
+        4. "Verify presence of required fields: plugin_id, version, category, frontend, and backend targets."
+        5. "If any required field is missing, return is_compliant=false and warning message."
+        6. "Verify existence of declared bundle targets (e.g. widget.js, style.css)."
+        7. "Return ManifestValidationResult."

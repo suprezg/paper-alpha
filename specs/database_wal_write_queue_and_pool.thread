@@ -1,0 +1,71 @@
+syntax = component
+
+Component: "Database WAL Write Queue and Pool"
+  Note: [[This component handles non-blocking database operations, buffering SQLCipher write queries in a multi-producer, single-consumer (MPSC) channel. 
+  A background thread worker pool processes writes sequentially in Write-Ahead Logging (WAL) mode, eliminating database write locks on Core's main execution loop.]]
+
+  Diagram: "classDiagram" [[
+    class WalWriteQueue {
+      +enqueue_write(command: DbWriteCommand) -> Result
+      +process_queue_loop() -> Result
+      +flush_pending_writes() -> Result
+    }
+  ]]
+
+  Invariants:
+    * "Write queries must be executed strictly in the order they were enqueued."
+    * "The main thread must never wait for disk write completion during tick operations."
+
+  Non-Functional:
+    * "The queue buffer size must support at least 10,000 enqueued write queries."
+
+  Models:
+    Model: "DbWriteCommand"
+      Type: "Struct"
+      Members:
+        * "sql_statement: String - The write query string"
+        * "bindings: List<Bytes> - Query binding parameters"
+
+  Contracts:
+    Contract: "EnqueueWrite"
+      Signature: "+enqueue_write(command: DbWriteCommand) -> Result"
+      Inputs:
+        * "command: DbWriteCommand - Write statement and parameters"
+      Outputs:
+        * "result: Result - Success or queue overflow error"
+      Requires:
+        * "The queue channel is initialized."
+      Ensures:
+        * "The command is pushed to the MPSC buffer."
+      Precondition:
+        * "The queue must not be in a shut down state."
+      Postcondition:
+        * "The queue count increments by 1."
+      Process:
+        1. "Lock queue channel sender handle."
+        2. "Push command to the tokio mpsc write queue channel."
+        3. "If channel is full, return Result::Err(QueueOverflow)."
+        4. "Return Result::Ok."
+
+    Contract: "ProcessQueueLoop"
+      Signature: "+process_queue_loop() -> Result"
+      Inputs:
+        * "None"
+      Outputs:
+        * "result: Result - Loop state exit status"
+      Requires:
+        * "Active database connection pool."
+      Ensures:
+        * "Continually dequeues and executes writes on the background thread."
+      Precondition:
+        * "Worker pool is active."
+      Postcondition:
+        * "All dequeued commands are executed inside an active SQLCipher transaction."
+      Process:
+        1. "Await incoming write command from the channel receiver."
+        2. "Acquire connection handle from the SQLx SQLite pool."
+        3. "Begin database transaction."
+        4. "Execute sql_statement with bindings."
+        5. "Commit database transaction."
+        6. "Wipe transient parameters memory."
+        7. "Repeat loop."

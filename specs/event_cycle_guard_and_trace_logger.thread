@@ -1,0 +1,50 @@
+syntax = component
+
+Component: "Event Cycle Guard and Trace Logger"
+  Note: [[The Event Cycle Guard intercepts stream envelopes on the High Speed Channel, inspecting their hop_trace arrays to prevent circular pub/sub routing loops. 
+  It logs cycle details to diagnostic channels and discards unsafe loops.]]
+
+  Diagram: "classDiagram" [[
+    class CycleGuard {
+      +verify_envelope_cycle(envelope: StreamEnvelope) -> Boolean
+      +log_circular_loop(envelope: StreamEnvelope) -> Result
+    }
+  ]]
+
+  Invariants:
+    * "Envelopes that fail cycle validation must be permanently discarded."
+    * "The hop_trace must log every unique plugin node that forwards the event."
+
+  Non-Functional:
+    * "Validation checks must execute in under 1 microsecond per envelope."
+
+  Models:
+    Model: "StreamEnvelope"
+      Type: "Struct"
+      Members:
+        * "topic: String - The target topic path"
+        * "publisher_id: String - Unique publisher process name"
+        * "sequence_id: uint64 - Monotonic sequence timestamp"
+        * "hop_trace: List<String> - List of traversed plugin nodes"
+        * "payload: Bytes - Binary raw data stream content"
+
+  Contracts:
+    Contract: "VerifyEnvelopeCycle"
+      Signature: "+verify_envelope_cycle(envelope: StreamEnvelope) -> Boolean"
+      Inputs:
+        * "envelope: StreamEnvelope - The incoming stream packet"
+      Outputs:
+        * "is_safe: Boolean - Safety check validation result"
+      Requires:
+        * "hop_trace array is present on the stream envelope."
+      Ensures:
+        * "Returns true if no circular loop is detected; false otherwise."
+      Precondition:
+        * "The publisher_plugin_id must not be empty."
+      Postcondition:
+        * "Unsafe packets are marked for immediate destruction."
+      Process:
+        1. "Read publisher_plugin_id from envelope."
+        2. "Search for publisher_plugin_id in the envelope.hop_trace array."
+        3. "If found, invoke log_circular_loop(envelope) and return false."
+        4. "If not found, return true."

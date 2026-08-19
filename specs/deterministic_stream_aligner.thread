@@ -1,0 +1,58 @@
+syntax = component
+
+Component: "Deterministic Stream Aligner"
+  Note: [[The Deterministic Stream Aligner synchronizes asynchronous tick feeds and technical indicator calculations by 
+  matching their monotonic sequence_id transaction sequence numbers. It maintains sliding buffer slots for active streams, 
+  aligning indices before outputting aligned frames.]]
+
+  Diagram: "classDiagram" [[
+    class StreamAligner {
+      +buffer_stream_event(envelope: StreamEnvelope) -> Result
+      +emit_aligned_frame() -> AlignedFrame
+    }
+  ]]
+
+  Invariants:
+    * "Events must be emitted in strictly increasing sequence_id order."
+    * "Buffered queue elements must drop if they exceed the max alignment timeout bounds."
+
+  Non-Functional:
+    * "The aligner queue capacity must be capped at 5000 elements per stream to prevent OOM memory expansion."
+
+  Models:
+    Model: "AlignedFrame"
+      Type: "Struct"
+      Members:
+        * "sequence_id: uint64 - Monotonic coordinate index ID"
+        * "events_map: Map<String, StreamEnvelope> - Map of stream topic to matching envelopes"
+
+    Model: "StreamEnvelope"
+      Type: "Struct"
+      Members:
+        * "topic: String - The target topic path"
+        * "publisher_id: String - Unique publisher process name"
+        * "sequence_id: uint64 - Monotonic sequence timestamp"
+        * "hop_trace: List<String> - List of traversed plugin nodes"
+        * "payload: Bytes - Binary raw data stream content"
+
+  Contracts:
+    Contract: "BufferStreamEvent"
+      Signature: "+buffer_stream_event(envelope: StreamEnvelope) -> Result"
+      Inputs:
+        * "envelope: StreamEnvelope - Dynamic publish event"
+      Outputs:
+        * "result: Result - Success void or buffer full status"
+      Requires:
+        * "Central Core clock sequence number tracking is active."
+      Ensures:
+        * "The envelope is sorted and inserted into the sequence queue buffer slot."
+      Precondition:
+        * "The sequence_id must be greater than the last successfully emitted frame ID."
+      Postcondition:
+        * "The queue length increments by 1."
+      Process:
+        1. "Identify buffer slot matching envelope.topic."
+        2. "Insert envelope at sorted index based on envelope.sequence_id."
+        3. "If buffer exceeds queue threshold, execute trim logic to drop oldest frames."
+        4. "Trigger emit_aligned_frame checker."
+        5. "Return Result::Ok."

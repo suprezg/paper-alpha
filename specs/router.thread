@@ -1,0 +1,134 @@
+syntax = component
+
+Component: "Router"
+  Note: [[The Router is responsible for directing all commands, task requests, and data 
+  envelopes between visual widgets, plugin processes (gRPC sidecars/WASM modules), 
+  and Core internal services. It acts as the traffic controller of the microkernel, 
+  matching routes and enforcing pub/sub topic mappings.]]
+
+  Diagram: "classDiagram" [[
+    class Router {
+      +register_route(plugin_id: String, transport: TransportType) -> Result
+      +route_command(request: CommandRequest) -> CommandResponse
+      +route_context_change(event: ContextChangeEvent) -> Result
+      +dispatch_stream(envelope: StreamEnvelope) -> Result
+    }
+  ]]
+
+  Invariants:
+    * "All active routes must map to a registered and healthy plugin listed in the Registry."
+    * "High-frequency stream envelopes must bypass the database and route directly to the High Speed Channel."
+    * "Incoming stream envelopes must not contain the receiving plugin's ID in the hop_trace history to prevent infinite feedback loops."
+
+  Non-Functional:
+    * "Routing latency for high-frequency stream events must be under 50 microseconds."
+    * "Memory consumption of the active routing table must remain stable and not exceed 5MB under continuous streaming."
+
+  Models:
+    Model: "RouteEntry"
+      Type: "Struct"
+      Members:
+        * "plugin_id: String - The unique identifier of the registered plugin"
+        * "transport: TransportType - Either a Unix Domain Socket path, Windows Named Pipe, or WASM instance pointer"
+        * "active_subscriptions: List<String> - List of topic keys this target is subscribed to"
+
+    Model: "TransportType"
+      Type: "Enum"
+      Members:
+        * "UdsSocket(String) - Filepath to Unix Domain Socket"
+        * "NamedPipe(String) - Path to Windows Named Pipe"
+        * "WasmMemory(Pointer) - Memory address of the guest WASM VM instance"
+
+    Model: "CommandRequest"
+      Type: "Struct"
+      Members:
+        * "request_id: String - Unique token ID"
+        * "action: String - Operation action verb"
+        * "payload: Struct - Input parameters object"
+
+    Model: "CommandResponse"
+      Type: "Struct"
+      Members:
+        * "request_id: String - Matching request ID"
+        * "success: Boolean - Execution success indicator"
+        * "result: Struct - Returned output data"
+        * "error_code: String - Error identification key"
+
+    Model: "ContextChangeEvent"
+      Type: "Struct"
+      Members:
+        * "key: String - The state key that changed"
+        * "value: Struct - Context parameter value"
+
+    Model: "StreamEnvelope"
+      Type: "Struct"
+      Members:
+        * "topic: String - Stream topic key"
+        * "publisher_plugin_id: String - Publisher node ID"
+        * "hop_trace: List<String> - Visual history trace"
+
+  Contracts:
+    Contract: "RouteCommand"
+      Signature: "+route_command(request: CommandRequest) -> CommandResponse"
+      Inputs:
+        * "request: CommandRequest - The command parameters and target plugin ID"
+      Outputs:
+        * "response: CommandResponse - The result of the command execution or an error code"
+      Requires:
+        * "The target plugin must be registered in the routing table."
+      Ensures:
+        * "The command payload is forwarded to the plugin process and the response is returned back to the caller widget."
+      Precondition:
+        * "The request must have a non-empty request_id and target plugin_id."
+      Postcondition:
+        * "The response contains the corresponding request_id matching the request."
+      Process:
+        1. "Lookup target plugin_id in the Registry routing table."
+        2. "If missing, return CommandResponse with success=false and error_code='ROUTE_NOT_FOUND'."
+        3. "Serialize request into Protobuf envelope."
+        4. "Transmit bytes over the target gRPC transport channel (UDS/Named Pipe/WASM memory)."
+        5. "Wait for response packet or timeout after 5000ms."
+        6. "If timeout occurs, return success=false and error_code='TIMEOUT'."
+        7. "Return deserialized CommandResponse."
+
+    Contract: "RouteContextChange"
+      Signature: "+route_context_change(event: ContextChangeEvent) -> Result"
+      Inputs:
+        * "event: ContextChangeEvent - The context variable key and new value"
+      Outputs:
+        * "result: Result - Void success or a routing failure status"
+      Requires:
+        * "Central Registry state is successfully updated before routing."
+      Ensures:
+        * "The context update is broadcasted to all active widgets and plugins registered for that context key."
+      Precondition:
+        * "The event key must be registered as a valid context key in the system."
+      Postcondition:
+        * "All matching target routes receive the context event notification."
+      Process:
+        1. "Query Registry to find all plugins subscribed to the changed context key."
+        2. "Iterate through matching plug-ins and spawn concurrent tokio dispatch tasks."
+        3. "Send OnContextChanged RPC to each plugin over UDS or WASM memory."
+        4. "Emit tauri context_changed event to UI widgets."
+
+    Contract: "DispatchStream"
+      Signature: "+dispatch_stream(envelope: StreamEnvelope) -> Result"
+      Inputs:
+        * "envelope: StreamEnvelope - The dynamic publish-subscribe message payload"
+      Outputs:
+        * "result: Result - Void success or a drop/failure status"
+      Requires:
+        * "Tokio Broadcast Event Bus is initialized."
+      Ensures:
+        * "Payload is routed to High Speed Channel or Slow Speed Bus depending on stream type."
+      Precondition:
+        * "The message hop_trace must not contain the publisher's own ID."
+      Postcondition:
+        * "The message is forwarded to all active subscribers for the topic."
+      Process:
+        1. "Read stream topic and verify cycle safety by checking if the publisher_plugin_id is in hop_trace."
+        2. "If cycle is detected, log warning, discard message, and return Result::Err(CircularLoop)."
+        3. "Append current node ID to hop_trace."
+        4. "If topic is real-time stream, push envelope to High Speed Channel (Tokio Broadcast Channels) and bypass DB caching."
+        5. "If topic is static/one-time, push envelope to Slow Speed Bus (MPSC queue) for SQLite caching and eventual widget forwarding."
+        6. "Return Result::Ok."

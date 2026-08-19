@@ -1,0 +1,80 @@
+syntax = component
+
+Component: "Subprocess and Wasm Process Manager"
+  Note: [[This manager acts as the execution supervisor for both native gRPC subprocesses (sidecars) and sandboxed WASM modules. 
+  It handles the lifecycle sequence: launching sidecar subprocesses, running WASM modules, managing memory pointers, triggering 
+  deallocation commands (dealloc) after host reads, and monitoring resource metrics.]]
+
+  Diagram: "classDiagram" [[
+    class ProcessManager {
+      +spawn_subprocess(plugin_id: String, command: String) -> Result
+      +terminate_subprocess(plugin_id: String) -> Result
+      +allocate_guest_memory(plugin_id: String, size: Size) -> Pointer
+      +deallocate_guest_memory(plugin_id: String, ptr: Pointer, size: Size) -> Result
+      +monitor_resources() -> List<ProcessMetrics>
+    }
+  ]]
+
+  Invariants:
+    * "A spawned subprocess must always have its output and error streams captured to prevent parent write blocks."
+    * "Guest WASM allocations must be deallocated immediately after FFI read operations complete."
+
+  Non-Functional:
+    * "Process monitors must consume less than 1% CPU overhead."
+    * "WASM memory dereferencing must execute under 1 microsecond."
+
+  Models:
+    Model: "ProcessMetrics"
+      Type: "Struct"
+      Members:
+        * "plugin_id: String - Target plugin identifier"
+        * "cpu_percentage: float32 - CPU core allocation percentage"
+        * "memory_bytes_used: uint64 - Resident set size in bytes"
+
+  Contracts:
+    Contract: "SpawnSubprocess"
+      Signature: "+spawn_subprocess(plugin_id: String, command: String) -> Result"
+      Inputs:
+        * "plugin_id: String - The target identifier"
+        * "command: String - Execute path details"
+      Outputs:
+        * "result: Result - Connection result"
+      Requires:
+        * "OS process spawning capabilities."
+      Ensures:
+        * "Process is successfully created and registers a gRPC pipe."
+      Precondition:
+        * "The command file must have executable permission flags."
+      Postcondition:
+        * "The child process PID is tracked inside the manager active list."
+      Process:
+        1. "Configure tokio::process::Command with captured stdio pipes."
+        2. "Inject required secure reference handles via initialization variables."
+        3. "Spawn child sidecar process."
+        4. "Initiate socket listen monitoring on the associated UDS/Named Pipe."
+        5. "Await handshake register RPC with a timeout of 5000ms."
+        6. "If register fails, terminate process and return failure status."
+        7. "Return Result::Ok."
+
+    Contract: "DeallocateGuestMemory"
+      Signature: "+deallocate_guest_memory(plugin_id: String, ptr: Pointer, size: Size) -> Result"
+      Inputs:
+        * "plugin_id: String - The target WASM plugin name"
+        * "ptr: Pointer - Memory offset pointer to release"
+        * "size: Size - Allocation size bytes"
+      Outputs:
+        * "result: Result - Release success status"
+      Requires:
+        * "WASM runtime is initialized."
+      Ensures:
+        * "The WASM instance guest memory space releases the allocated block back to the allocator."
+      Precondition:
+        * "The memory address must be bounded by the instance heap limits."
+      Postcondition:
+        * "The memory address space is freed and recycled by guest allocator."
+      Process:
+        1. "Lookup WASM module instance matching plugin_id."
+        2. "Locate exported function dealloc(ptr, size)."
+        3. "Invoke guest dealloc export."
+        4. "Wipe host references to ptr address."
+        5. "Return Result::Ok."

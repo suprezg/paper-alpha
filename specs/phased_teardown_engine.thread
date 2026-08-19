@@ -1,0 +1,48 @@
+syntax = component
+
+Component: "Phased Teardown Engine"
+  Note: [[The Phased Teardown Engine coordinates the graceful shutdown sequence of the application. 
+  On exit commands, it blocks window closure, broadcasts Shutdown RPCs to all plugins, monitors a 
+  2000ms grace timeout, applies SIGKILL to lingering native subprocesses, flushes cache databases, 
+  and terminates the core safely.]]
+
+  Diagram: "classDiagram" [[
+    class TeardownEngine {
+      +trigger_shutdown() -> Result
+      +signal_plugin_shutdown(plugin_id: String) -> Result
+      +terminate_lingering_processes() -> Result
+    }
+  ]]
+
+  Invariants:
+    * "The Database must flush and close its connections last, after all plugin streams have ceased."
+    * "A SIGKILL signal must be issued if a plugin process remains active after the 2000ms timeout."
+
+  Non-Functional:
+    * "The complete shutdown sequence must execute within 2500ms under all conditions."
+
+  Contracts:
+    Contract: "TriggerShutdown"
+      Signature: "+trigger_shutdown() -> Result"
+      Inputs:
+        * "None"
+      Outputs:
+        * "result: Result - Teardown completion status"
+      Requires:
+        * "Host system process control APIs."
+      Ensures:
+        * "All sidecars are terminated, database commits are flushed, and Core closes."
+      Precondition:
+        * "Application exit request has been intercepted."
+      Postcondition:
+        * "No zombie processes remain in the OS process table."
+      Process:
+        1. "Block default application window close event."
+        2. "Identify all registered plugins in the Registry."
+        3. "Asynchronously send Shutdown RPCs to all plugins concurrently."
+        4. "Initiate a 2000ms timer countdown task."
+        5. "Await confirmation from all processes."
+        6. "If the timer fires before all confirm, call terminate_lingering_processes to force close remaining processes."
+        7. "Flush WAL database write queue and close pool connections."
+        8. "Allow main window close event to proceed."
+        9. "Return Result::Ok."

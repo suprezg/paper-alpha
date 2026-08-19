@@ -1,0 +1,64 @@
+syntax = component
+
+Component: "Encryption Engine"
+  Note: [[The Encryption Engine manages password hashing, data decryption/encryption for plugin credentials, and key derivation. 
+  It utilizes Argon2id for password verification and AES-256-GCM for credential encryption. 
+  Decrypted credentials and keys are locked in non-swappable memory blocks (mlock) to prevent swap-to-disk leaks.]]
+
+  Diagram: "classDiagram" [[
+    class EncryptionEngine {
+      +derive_key(password: String, salt: Bytes) -> DerivedKey
+      +encrypt_data(raw_data: Bytes, key: DerivedKey) -> EncryptedData
+      +decrypt_data(encrypted: EncryptedData, key: DerivedKey) -> DecryptedData
+      +lock_memory(pointer: Pointer, size: Size) -> Result
+    }
+  ]]
+
+  Invariants:
+    * "All derived keys must be locked in RAM using mlock or equivalent OS memory locks."
+    * "Salt values must be generated using cryptographically secure random number generators (CSPRNG)."
+
+  Non-Functional:
+    * "Argon2id password verification parameters must adhere to OWASP guidelines (m=19456, t=2, p=1)."
+
+  Models:
+    Model: "EncryptedData"
+      Type: "Struct"
+      Members:
+        * "ciphertext: Bytes - Encrypted raw bytes"
+        * "nonce: Bytes - 12-byte initialization vector"
+        * "tag: Bytes - 16-byte authentication tag"
+
+    Model: "DerivedKey"
+      Type: "Struct"
+      Members:
+        * "key_bytes: Pointer - Memory address to locked 256-bit key"
+
+    Model: "DecryptedData"
+      Type: "Struct"
+      Members:
+        * "raw_bytes: Bytes - Plaintext decrypted values payload"
+
+  Contracts:
+    Contract: "EncryptData"
+      Signature: "+encrypt_data(raw_data: Bytes, key: DerivedKey) -> EncryptedData"
+      Inputs:
+        * "raw_data: Bytes - Raw plaintext"
+        * "key: DerivedKey - Encrypted key reference handle"
+      Outputs:
+        * "encrypted: EncryptedData - Authenticated encryption envelope"
+      Requires:
+        * "CSPRNG is active."
+      Ensures:
+        * "The returned data is encrypted with AES-256-GCM."
+      Precondition:
+        * "The raw_data must not exceed the max plaintext block sizes."
+      Postcondition:
+        * "The cipher payload contains valid MAC signature validation tags."
+      Process:
+        1. "Generate a unique random 12-byte nonce using secure system entropy."
+        2. "Read key bytes from locked memory pointer safely."
+        3. "Initialize AES-256-GCM cipher context."
+        4. "Encrypt raw_data and generate authentication tag."
+        5. "Wipe ephemeral local memory variables immediately."
+        6. "Return EncryptedData containing ciphertext, nonce, and tag."
