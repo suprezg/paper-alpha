@@ -14,6 +14,9 @@
     <i>A privacy-first, modular quantitative trading and market analysis workstation.</i>
 </p>
 
+> [!NOTE]
+> **Active Development:** This project is currently a work in progress and is being actively buil!
+
 ## Abstract
 
 Paper-Alpha is an extensible, privacy-first quantitative trading and market analysis workstation. Designed for algorithmic traders, quantitative researchers, and market analysts, it provides a flexible environment that unifies real-time charting, order execution, trade simulation, and customizable analytical dashboards into a cohesive desktop workspace. Operating entirely on local hardware with zero external cloud dependencies, Paper-Alpha guarantees that proprietary trading strategies, sensitive financial credentials, and bespoke models remain strictly private and under the user's sole custody.
