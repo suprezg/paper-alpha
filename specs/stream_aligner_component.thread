@@ -1,0 +1,109 @@
+Component StreamAligner
+{
+    !Note [[
+        Deterministic Stream Aligner synchronizing asynchronous tick feeds and real-time indicator calculations.
+        Matches monotonic sequence_id transaction numbers stamped by Core's Clock Sequencer, maintaining sliding
+        buffer slots for active streams to eliminate clock-drift anomalies before outputting merged frames.
+    ]]
+
+    !Diagram AlignerFlow
+    [[
+        ```mermaid
+        flowchart TD
+            StreamIn([High-Speed Stream Envelopes]) --> Buffer[StreamAligner::bufferStreamEvent]
+            Buffer --> Sort[Insert at monotonic sequence_id slot]
+            Sort --> CheckReady{Aligned across topics?}
+            CheckReady -- Yes --> Emit[StreamAligner::emitAlignedFrame]
+            CheckReady -- No --> Wait[Wait for missing streams / timeout]
+            Emit --> Merged[AlignedFrame dispatched to 60Hz buffer]
+        ```
+    ]]
+
+    Invariants
+    {
+        "MonotonicSequence: Aligned frames must be emitted in strictly ascending sequence_id order."
+        "BoundedBufferSlots: Buffer queue capacity per stream must not exceed 5000 elements."
+        "TimeoutEviction: Out-of-order packets exceeding max alignment timeout must be evicted."
+    }
+
+    Model AlignedFrame
+    {
+        Type "Struct"
+        Members
+        {
+            "sequence_id": "Int"
+            "events_json": "String"
+            "timestamp_ns": "Int"
+        }
+    }
+
+    @protocol(HighSpeedBusProtocol::HighSpeedBroadcastPipe)
+    @diagram(AlignerFlow)
+    Contract bufferStreamEvent
+    {
+        Signature "bufferStreamEvent(envelope: HighSpeedBusProtocol::StreamEnvelope)" -> "Boolean"
+
+        Requires "Clock sequence numbering is active."
+
+        Ensures "Inserts envelope into sorted sequence buffer slot for corresponding topic."
+
+        Precondition
+        {
+            "envelope.sequence_id is greater than last emitted sequence."
+        }
+
+        Postcondition
+        {
+            "Buffer length increments by 1."
+        }
+
+        Process
+        {
+            1. "Identify topic buffer slot for envelope.topic."
+            2. "Insert envelope into sorted position based on sequence_id."
+            3. "If buffer length exceeds 5000 elements, drop oldest unaligned frames."
+            4. "Trigger emitAlignedFrame evaluation."
+            5. "Return true."
+        }
+
+        Errors
+        {
+            "BufferOverflow"
+            "StaleSequenceId"
+        }
+    }
+
+    @diagram(AlignerFlow)
+    Contract emitAlignedFrame
+    {
+        Signature "emitAlignedFrame(sequence_id: Int)" -> "StreamAligner::AlignedFrame"
+
+        Requires "Aligned frames exist in buffer slots."
+
+        Ensures "Constructs and emits combined AlignedFrame matching specified sequence_id."
+
+        Precondition
+        {
+            "All active stream topics have matching sequence_id or reached alignment timeout."
+        }
+
+        Postcondition
+        {
+            "Emitted frames are removed from buffer slots."
+        }
+
+        Process
+        {
+            1. "Collect all topic envelopes matching sequence_id."
+            2. "Construct AlignedFrame struct."
+            3. "Remove collected envelopes from sliding buffer slots."
+            4. "Forward AlignedFrame to UI frame coordinator."
+            5. "Return AlignedFrame."
+        }
+
+        Errors
+        {
+            "FrameNotReady"
+        }
+    }
+}

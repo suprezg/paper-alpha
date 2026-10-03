@@ -1,0 +1,275 @@
+Feature WorkspaceConfiguration
+{
+    !Note [[
+        Governs application settings, plugin management, directory rescanning, secure credential vault
+        management with access control lists (ACLs), security key regeneration, exhausted key alerts,
+        and visual theme customization on the Configure page.
+    ]]
+
+    !Diagram ConfigFlow
+    [[
+        ```mermaid
+        flowchart TD
+            User([Trader on Configure Page]) --> Nav{Section?}
+            Nav -- Plugins --> Toggle[Toggle Plugin State in RegistryService]
+            Nav -- Rescan --> Rescan[PluginScanner::scanDirectory]
+            Nav -- Secrets --> SaveSec[Save Variable in CoreStorage::secure_variables]
+            Nav -- Security Keys --> Regen[Regenerate Backup Codes / Phrase]
+            Nav -- Appearance --> Theme[Persist theme tokens in CoreStorage::theme_settings]
+        ```
+    ]]
+
+    Background
+    {
+        Given "an authenticated user is on the 'Configure Page'"
+        And "the Core database pool is active"
+    }
+
+    Rule "Plugin Categorization and State Management"
+    {
+        @component(RegistryService::registerPlugin)
+        @storage(CoreStorage::plugin_configs)
+        Scenario DisplayPluginCategories
+        {
+            Title "Configure page displays plugins categorized into two distinct pillars"
+
+            Given "the user navigates to the Plugins tab"
+            Then "two primary plugin categories are displayed: 'Data Feed Plugins' and 'Data Consumer Plugins'"
+            And "each compliant plugin displays an interactive toggle switch"
+        }
+
+        @component(RegistryService::registerPlugin)
+        @storage(CoreStorage::plugin_configs)
+        Scenario ToggleDataFeedPlugin
+        {
+            Title "Toggling a Data Feed plugin state updates database"
+
+            Given "plugin 'Yahoo Finance' is in 'Data Feed Plugins'"
+            When "the user toggles 'Yahoo Finance' to 'Enabled'"
+            Then "the plugin state is updated in RegistryService"
+            And "the change is saved to CoreStorage::plugin_configs"
+        }
+
+        @component(RegistryService::registerPlugin)
+        @storage(CoreStorage::plugin_configs)
+        Scenario ToggleDataConsumerPlugin
+        {
+            Title "Toggling a Data Consumer plugin state updates database"
+
+            Given "plugin 'Binance Order Execution' is in 'Data Consumer Plugins'"
+            When "the user toggles 'Binance Order Execution' to 'Enabled'"
+            Then "the plugin state is updated in RegistryService"
+            And "the change is saved to CoreStorage::plugin_configs"
+        }
+
+        @component(PluginScanner::scanDirectory)
+        @component(PluginScanner::validateManifest)
+        @storage(CoreStorage::plugin_configs)
+        @diagram(ConfigFlow)
+        Scenario RescanDiscoveredPlugins
+        {
+            Title "Rescanning local plugin folders registers newly added packages"
+
+            Given "a new plugin 'MACD Oscillator' was added to the plugins directory"
+            When "the user clicks the 'Rescan Plugins' button"
+            Then "PluginScanner scans the directory and validates manifests"
+            And "the plugin 'MACD Oscillator' appears in the Data Consumer Plugins list"
+            And "a notification 'Plugin rescan complete. 1 new plugin discovered.' is displayed"
+        }
+    }
+
+    Rule "Non-Compliant Plugin Isolation and Locking"
+    {
+        @component(PluginScanner::validateManifest)
+        Scenario DisplayNonCompliantPlugins
+        {
+            Title "Invalid or corrupted plugins display failure warning"
+
+            Given "a plugin 'MalformedFeed' has invalid manifest syntax"
+            When "the application scans the plugins folder"
+            Then "the plugin toggle is locked in the disabled position"
+            And "a status badge 'Interface Validation Failed' is shown"
+        }
+
+        @component(PluginScanner::validateManifest)
+        Scenario PreventEnablingNonCompliantPlugins
+        {
+            Title "Users cannot enable non-compliant plugins"
+
+            Given "a plugin 'MalformedFeed' is marked as non-compliant"
+            When "the user attempts to click the toggle switch"
+            Then "the switch remains in the disabled state"
+            And "an error toast 'Cannot enable plugin: structural protocol validation failed' is shown"
+            And "Core does not spawn any process"
+        }
+    }
+
+    Rule "Secure Variable Storage and Access Control Lists"
+    {
+        @component(EncryptionEngine::encryptData)
+        @component(DatabaseWalQueue::enqueueWrite)
+        @storage(CoreStorage::secure_variables)
+        @storage(CoreStorage::variable_acls)
+        Scenario SaveSecureVariableWithAcl
+        {
+            Title "Adding encrypted variable with plugin-specific ACLs"
+
+            Given "the user is in the Secure Variables section"
+            When "the user enters variable 'BINANCE_API_KEY' and value 'secret_key_998877'"
+            And "grants read permissions to 'Binance Order Execution'"
+            And "denies permissions to 'Yahoo Finance'"
+            And "clicks 'Save Variable'"
+            Then "the secret is encrypted with AES-256-GCM and stored in CoreStorage::secure_variables"
+            And "access rules are stored in CoreStorage::variable_acls"
+            And "the secret is never written to any plugin database"
+        }
+
+        @component(KeyResolverSdk::resolveRefVariable)
+        @storage(CoreStorage::variable_acls)
+        Scenario AuthorizedPluginReadSecureVariable
+        {
+            Title "Authorized plugin resolves variable handle via local IPC"
+
+            Given "secure variable 'BINANCE_API_KEY' is granted to 'Binance Order Execution'"
+            When "'Binance Order Execution' SDK makes an outbound exchange request with ApiKeyRef"
+            Then "KeyResolverSdk resolves the handle over local IPC"
+            And "Core provides decrypted bytes in memory"
+        }
+
+        @storage(CoreStorage::secure_variables)
+        Scenario BlockPluginUpdateSecureVariable
+        {
+            Title "Plugins are strictly forbidden from mutating secure variables"
+
+            Given "plugin 'Binance Order Execution' is executing"
+            When "the plugin attempts to send an update command for 'BINANCE_API_KEY'"
+            Then "Core rejects the modification request"
+            And "the original value in CoreStorage::secure_variables remains unchanged"
+        }
+
+        @storage(CoreStorage::variable_acls)
+        Scenario BlockUnauthorizedPluginRead
+        {
+            Title "Unauthorized plugins receive access denied when attempting to resolve handles"
+
+            Given "plugin 'Yahoo Finance' has no ACL for 'BINANCE_API_KEY'"
+            When "'Yahoo Finance' attempts to resolve 'BINANCE_API_KEY'"
+            Then "Core rejects the request with an unauthorized error"
+            And "no secret data is exposed"
+        }
+    }
+
+    Rule "Security Key Visibility and Regeneration"
+    {
+        @storage(CoreStorage::backup_codes)
+        @storage(CoreStorage::recovery_phrases)
+        Scenario MaskSecurityCredentialsByDefault
+        {
+            Title "Security credentials are masked by default and revealed via eye toggle"
+
+            Given "the user is in the Security Credentials section"
+            Then "remaining backup codes and recovery phrase are masked with asterisks"
+            When "the user clicks the eye icon next to Backup Codes"
+            Then "the remaining unused backup codes are revealed"
+            When "the user clicks the eye icon next to Recovery Phrase"
+            Then "the recovery phrase words are revealed"
+        }
+
+        @component(DatabaseWalQueue::enqueueWrite)
+        @storage(CoreStorage::backup_codes)
+        Scenario RegenerateBackupCodes
+        {
+            Title "Regenerating backup codes replaces existing codes"
+
+            Given "the user clicks 'Regenerate Backup Codes'"
+            Then "a dialog opens showing 10 new emergency backup codes"
+            When "the user clicks 'Copy' and confirms with 'Okay'"
+            Then "the old backup codes are replaced in CoreStorage::backup_codes"
+            And "the dialog closes"
+        }
+
+        @component(DatabaseWalQueue::enqueueWrite)
+        @storage(CoreStorage::recovery_phrases)
+        Scenario RegenerateRecoveryPhrase
+        {
+            Title "Regenerating recovery phrase generates new seed words and clears warning"
+
+            Given "an alert 'Recovery phrase is not configured' is active"
+            When "the user clicks 'Regenerate Recovery Phrase'"
+            Then "a modal displays a new mnemonic phrase"
+            When "the user confirms with 'Okay'"
+            Then "the new phrase is stored in CoreStorage::recovery_phrases"
+            And "the top-level alert automatically clears"
+        }
+    }
+
+    Rule "Exhausted Security Keys Alert Banners"
+    {
+        @storage(CoreStorage::backup_codes)
+        Scenario AlertBannerBackupCodesExhausted
+        {
+            Title "Top alert banner displayed when all backup codes are used"
+
+            Given "all 10 backup codes have been consumed"
+            And "the user has a valid recovery phrase"
+            Then "an alert banner 'Backup codes not configured' is displayed at the top of the page"
+        }
+
+        @storage(CoreStorage::recovery_phrases)
+        Scenario AlertBannerRecoveryPhraseConsumed
+        {
+            Title "Top alert banner displayed when recovery phrase is consumed"
+
+            Given "the recovery phrase has been consumed"
+            And "unused backup codes remain"
+            Then "an alert banner 'Recovery phrase is not configured' is displayed at the top of the page"
+        }
+
+        @storage(CoreStorage::backup_codes)
+        @storage(CoreStorage::recovery_phrases)
+        Scenario AlertBannerDualSecurityKeysExhausted
+        {
+            Title "Dual alert banners displayed when all security credentials are exhausted"
+
+            Given "all backup codes and recovery phrase are exhausted"
+            Then "both 'Backup codes not configured' and 'Recovery phrase is not configured' alerts are shown"
+        }
+    }
+
+    Rule "Appearance and Visual Theme Customization"
+    {
+        @storage(CoreStorage::theme_settings)
+        Scenario ApplyThemePresetLight
+        {
+            Title "Applying Light theme preset updates CSS tokens"
+
+            Given "the user is in the Appearance section"
+            When "the user clicks 'Light Theme'"
+            Then "colors update to Light defaults"
+            And "the preset is saved to CoreStorage::theme_settings"
+        }
+
+        @storage(CoreStorage::theme_settings)
+        Scenario ApplyThemePresetDark
+        {
+            Title "Applying Dark theme preset updates CSS tokens"
+
+            Given "the user is in the Appearance section"
+            When "the user clicks 'Dark Theme'"
+            Then "colors update to Dark defaults"
+            And "the preset is saved to CoreStorage::theme_settings"
+        }
+
+        @storage(CoreStorage::theme_settings)
+        Scenario CustomizeThemeTokensAndRadius
+        {
+            Title "Customizing individual color pickers and corner radius"
+
+            Given "the user is customizing appearance tokens"
+            When "the user adjusts Primary, Secondary, Background, and Foreground pickers"
+            And "sets corner radius slider to '8px'"
+            Then "the UI updates dynamically"
+            And "custom tokens are persisted to CoreStorage::theme_settings"
+        }
+    }
+}

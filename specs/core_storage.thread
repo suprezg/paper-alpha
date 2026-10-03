@@ -1,0 +1,220 @@
+Storage CoreStorage
+{
+    !Note [[
+        Central encrypted storage engine for Paper-Alpha utilizing SQLCipher with AES-256 encryption.
+        Operates in Write-Ahead Logging (WAL) mode to support concurrent non-blocking reads while all
+        database writes are asynchronously queued through the WAL write queue.
+        Persists user profiles, single-use security keys, recovery mnemonics, encrypted credential vaults,
+        plugin states, workspace layouts, theme configurations, and static query cache data.
+    ]]
+
+    !Diagram StorageERD
+    [[
+        ```mermaid
+        erDiagram
+            users ||--o{ backup_codes : owns
+            users ||--|| recovery_phrases : owns
+            users ||--o{ secure_variables : stores
+            secure_variables ||--o{ variable_acls : grants
+            users ||--o{ workspace_layouts : configures
+        ```
+    ]]
+
+    Engine "SQLite3 / SQLCipher"
+
+    @diagram(StorageERD)
+    Table users
+    {
+        Fields
+        {
+            "id": "UUID [PrimaryKey, NonNull]"
+            "username": "String(64) [NonNull, Unique]"
+            "password_hash": "String(255) [NonNull]"
+            "status": "String(32) [NonNull, Default('active')]"
+            "created_at": "Date [NonNull, Default(NOW)]"
+        }
+
+        Indexes
+        {
+            idx_users_username (username)
+            idx_users_status (status)
+        }
+    }
+
+    @diagram(StorageERD)
+    Table backup_codes
+    {
+        Fields
+        {
+            "id": "UUID [PrimaryKey, NonNull]"
+            "user_id": "UUID [NonNull, ForeignKey(users.id)]"
+            "code_hash": "String(255) [NonNull]"
+            "is_consumed": "Boolean [NonNull, Default(false)]"
+            "created_at": "Date [NonNull, Default(NOW)]"
+        }
+
+        Indexes
+        {
+            idx_backup_codes_user (user_id)
+            idx_backup_codes_consumed (is_consumed)
+        }
+
+        Relations
+        {
+            users.id 1:N backup_codes.user_id
+        }
+    }
+
+    @diagram(StorageERD)
+    Table recovery_phrases
+    {
+        Fields
+        {
+            "id": "UUID [PrimaryKey, NonNull]"
+            "user_id": "UUID [NonNull, ForeignKey(users.id)]"
+            "phrase_hash": "String(255) [NonNull]"
+            "is_consumed": "Boolean [NonNull, Default(false)]"
+            "created_at": "Date [NonNull, Default(NOW)]"
+        }
+
+        Indexes
+        {
+            idx_recovery_phrase_user (user_id)
+            idx_recovery_phrase_consumed (is_consumed)
+        }
+
+        Relations
+        {
+            users.id 1:1 recovery_phrases.user_id
+        }
+    }
+
+    @diagram(StorageERD)
+    Table secure_variables
+    {
+        Fields
+        {
+            "id": "UUID [PrimaryKey, NonNull]"
+            "user_id": "UUID [NonNull, ForeignKey(users.id)]"
+            "key_name": "String(128) [NonNull]"
+            "encrypted_value": "String(1024) [NonNull]"
+            "nonce": "String(64) [NonNull]"
+            "tag": "String(64) [NonNull]"
+            "created_at": "Date [NonNull, Default(NOW)]"
+        }
+
+        Indexes
+        {
+            idx_secure_vars_user (user_id)
+            idx_secure_vars_key (key_name)
+        }
+
+        Relations
+        {
+            users.id 1:N secure_variables.user_id
+        }
+    }
+
+    @diagram(StorageERD)
+    Table variable_acls
+    {
+        Fields
+        {
+            "id": "UUID [PrimaryKey, NonNull]"
+            "variable_id": "UUID [NonNull, ForeignKey(secure_variables.id)]"
+            "plugin_id": "String(128) [NonNull]"
+            "permission": "String(32) [NonNull, Default('read')]"
+        }
+
+        Indexes
+        {
+            idx_acls_var (variable_id)
+            idx_acls_plugin (plugin_id)
+        }
+
+        Relations
+        {
+            secure_variables.id 1:N variable_acls.variable_id
+        }
+    }
+
+    Table plugin_configs
+    {
+        Fields
+        {
+            "id": "UUID [PrimaryKey, NonNull]"
+            "plugin_id": "String(128) [NonNull, Unique]"
+            "category": "String(64) [NonNull]"
+            "is_enabled": "Boolean [NonNull, Default(false)]"
+            "install_path": "String(512) [NonNull]"
+            "updated_at": "Date [NonNull, Default(NOW)]"
+        }
+
+        Indexes
+        {
+            idx_plugins_id (plugin_id)
+            idx_plugins_category (category)
+        }
+    }
+
+    @diagram(StorageERD)
+    Table workspace_layouts
+    {
+        Fields
+        {
+            "id": "UUID [PrimaryKey, NonNull]"
+            "user_id": "UUID [NonNull, ForeignKey(users.id)]"
+            "tab_id": "String(64) [NonNull]"
+            "tab_title": "String(128) [NonNull]"
+            "tab_order": "Int [NonNull]"
+            "layout_json": "Text [NonNull]"
+            "updated_at": "Date [NonNull, Default(NOW)]"
+        }
+
+        Indexes
+        {
+            idx_layouts_user (user_id)
+            idx_layouts_tab (tab_id)
+        }
+
+        Relations
+        {
+            users.id 1:N workspace_layouts.user_id
+        }
+    }
+
+    Table theme_settings
+    {
+        Fields
+        {
+            "id": "UUID [PrimaryKey, NonNull]"
+            "theme_name": "String(64) [NonNull]"
+            "tokens_json": "Text [NonNull]"
+            "corner_radius": "String(16) [NonNull, Default('8px')]"
+            "updated_at": "Date [NonNull, Default(NOW)]"
+        }
+
+        Indexes
+        {
+            idx_theme_name (theme_name)
+        }
+    }
+
+    Table static_query_cache
+    {
+        Fields
+        {
+            "id": "UUID [PrimaryKey, NonNull]"
+            "topic_key": "String(255) [NonNull, Unique]"
+            "payload_json": "Text [NonNull]"
+            "cached_at": "Date [NonNull, Default(NOW)]"
+            "expires_at": "Date [NonNull]"
+        }
+
+        Indexes
+        {
+            idx_cache_topic (topic_key)
+            idx_cache_expiry (expires_at)
+        }
+    }
+}

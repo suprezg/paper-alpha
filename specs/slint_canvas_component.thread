@@ -1,0 +1,275 @@
+Component SlintCanvasCoordinator
+{
+    !Note [[
+        Coordinates the 2D modular canvas grid within the Slint native GUI runtime.
+        Manages dynamic browser-style persistent workspace tabs created via the '+' button.
+        Supports independent widget layouts per tab, drag-and-drop grid positioning, resize reflow,
+        tab switching with reference-counted topic hibernation, and session persistence to CoreStorage::workspace_layouts.
+    ]]
+
+    !Diagram SlintCanvasFlow
+    [[
+        ```mermaid
+        flowchart TD
+            PlusBtn([Click '+' New Tab Icon]) --> CreateTab[SlintCanvasCoordinator::createWorkspaceTab]
+            CreateTab --> InitModel[Initialize Slint Tab VecModel]
+            InitModel --> SaveTab[Persist Tab to CoreStorage::workspace_layouts]
+            SchemaTree([Declarative Widget Tree]) --> Mount[SlintCanvasCoordinator::mountDeclarativeWidget]
+            Mount --> AddToModel[Append to Tab VecModel]
+            AddToModel --> RetainedPaint[Slint Retained UI Renders Tile]
+            UserDrag([User Drags / Resizes Tile]) --> UpdateLayout[SlintCanvasCoordinator::updateCanvasLayout]
+            UpdateLayout --> SaveDB[Update CoreStorage::workspace_layouts]
+            TabSwitch([User Switches Tab]) --> SwitchTab[SlintCanvasCoordinator::switchActiveTab]
+            SwitchTab --> Hibernate[Hibernate Inactive Tab & Pause Streams]
+            ReLogin([User Re-Logins / App Start]) --> LoadTabs[SlintCanvasCoordinator::loadUserTabs]
+            LoadTabs --> RestoreState[Restore All Tabs & Widgets from DB]
+        ```
+    ]]
+
+    Invariants
+    {
+        "RetainedSceneGraph: Slint UI updates must trigger repaints strictly upon property mutations."
+        "TabIsolation: Hidden workspace tabs must hibernate paint execution and decrement topic subscription counts."
+        "LayoutPersistence: Dynamic workspace tabs and widget adjustments must persist reliably to CoreStorage::workspace_layouts across sessions."
+    }
+
+    Model CanvasLayoutDescriptor
+    {
+        Type "Struct"
+        Members
+        {
+            "tab_id": "String"
+            "tab_title": "String"
+            "tab_order": "Int"
+            "tiles_layout_json": "String"
+        }
+    }
+
+    Model TilePosition
+    {
+        Type "Struct"
+        Members
+        {
+            "tile_identifier": "String"
+            "grid_col": "Int"
+            "grid_row": "Int"
+            "span_cols": "Int"
+            "span_rows": "Int"
+        }
+    }
+
+    @diagram(SlintCanvasFlow)
+    @storage(CoreStorage::workspace_layouts)
+    Contract createWorkspaceTab
+    {
+        Signature "createWorkspaceTab(tab_title: String)" -> "SlintCanvasCoordinator::CanvasLayoutDescriptor"
+
+        Requires "Slint runtime context is active."
+
+        Ensures "Creates a new persistent workspace tab, appends it to the tab bar, and initializes an empty VecModel."
+
+        Precondition
+        {
+            "tab_title is non-empty String."
+        }
+
+        Postcondition
+        {
+            "New tab is active and registered in CoreStorage::workspace_layouts."
+        }
+
+        Process
+        {
+            1. "Generate unique tab_id UUID."
+            2. "Determine next tab_order sequence index."
+            3. "Construct initial empty layout JSON structure."
+            4. "Append new tab descriptor to Slint tab collection model."
+            5. "Switch active tab view to newly created tab."
+            6. "Persist initial tab layout to CoreStorage::workspace_layouts."
+            7. "Return CanvasLayoutDescriptor."
+        }
+
+        Errors
+        {
+            "InvalidTabTitle"
+            "StorageError"
+        }
+    }
+
+    @diagram(SlintCanvasFlow)
+    @storage(CoreStorage::workspace_layouts)
+    Contract closeWorkspaceTab
+    {
+        Signature "closeWorkspaceTab(tab_id: String)" -> "Boolean"
+
+        Requires "Slint main shell is active."
+
+        Ensures "Closes designated workspace tab, unmounts its widgets, decrements topic subscriptions, and deletes layout."
+
+        Precondition
+        {
+            "tab_id exists in active tabs."
+        }
+
+        Postcondition
+        {
+            "Tab is removed from Slint tab bar and CoreStorage::workspace_layouts."
+        }
+
+        Process
+        {
+            1. "Lookup tab_id in active tabs collection."
+            2. "Unmount all widgets on target tab."
+            3. "Trigger decrementSubscription for all active topics on unmounted widgets."
+            4. "Remove tab entry from CoreStorage::workspace_layouts."
+            5. "Select adjacent tab as new active tab."
+            6. "Return true."
+        }
+
+        Errors
+        {
+            "TabNotFound"
+            "CannotCloseLastTab"
+        }
+    }
+
+    @diagram(SlintCanvasFlow)
+    @storage(CoreStorage::workspace_layouts)
+    Contract loadUserTabs
+    {
+        Signature "loadUserTabs(user_id: String)" -> "Int"
+
+        Requires "CoreStorage database pool is initialized."
+
+        Ensures "Loads all saved tabs and widget layouts for authenticated user from CoreStorage::workspace_layouts."
+
+        Precondition
+        {
+            "user_id is valid authenticated user UUID."
+        }
+
+        Postcondition
+        {
+            "Slint tab models and widget canvases are restored in original state and order."
+        }
+
+        Process
+        {
+            1. "Query CoreStorage::workspace_layouts ordered by tab_order ASC for user_id."
+            2. "If no layouts exist, generate default initial workspace tab."
+            3. "Populate Slint tab bar collection."
+            4. "Instantiate widget tiles from layout_json for the active tab."
+            5. "Return count of restored tabs."
+        }
+
+        Errors
+        {
+            "DatabaseReadError"
+            "InvalidUserSession"
+        }
+    }
+
+    @diagram(SlintCanvasFlow)
+    Contract mountDeclarativeWidget
+    {
+        Signature "mountDeclarativeWidget(widget_id: String, target_tab_id: String)" -> "Boolean"
+
+        Requires "Slint runtime context is active."
+
+        Ensures "Appends instantiated declarative widget into active Slint VecModel for target workspace tab."
+
+        Precondition
+        {
+            "widget_id is registered in schema engine."
+            "target_tab_id is valid active workspace tab."
+        }
+
+        Postcondition
+        {
+            "Slint model updates and renders widget tile in retained scene graph."
+        }
+
+        Process
+        {
+            1. "Lookup parsed widget in DeclarativeSchemaEngine."
+            2. "Locate active Slint VecModel for target_tab_id."
+            3. "Append widget view model struct to VecModel."
+            4. "Slint property bindings trigger dirty region repaint."
+            5. "Return true."
+        }
+
+        Errors
+        {
+            "WidgetNotFound"
+            "InvalidTabTarget"
+        }
+    }
+
+    @storage(CoreStorage::workspace_layouts)
+    @diagram(SlintCanvasFlow)
+    Contract updateCanvasLayout
+    {
+        Signature "updateCanvasLayout(layout: SlintCanvasCoordinator::CanvasLayoutDescriptor)" -> "Boolean"
+
+        Requires "CoreStorage database pool is initialized."
+
+        Ensures "Persists updated grid positions, sizes, and tile states to CoreStorage::workspace_layouts."
+
+        Precondition
+        {
+            "layout.tab_id is non-empty valid tab."
+        }
+
+        Postcondition
+        {
+            "Layout descriptor is saved in SQLCipher."
+        }
+
+        Process
+        {
+            1. "Validate layout.tiles_layout_json structure."
+            2. "Execute UPSERT on CoreStorage::workspace_layouts for layout.tab_id."
+            3. "Return true."
+        }
+
+        Errors
+        {
+            "InvalidLayoutData"
+            "DatabaseWriteError"
+        }
+    }
+
+    @diagram(SlintCanvasFlow)
+    Contract switchActiveTab
+    {
+        Signature "switchActiveTab(target_tab_id: String)" -> "Boolean"
+
+        Requires "Slint main shell is active."
+
+        Ensures "Switches active tab view, unhiding new tab while hibernating previous tab widgets."
+
+        Precondition
+        {
+            "target_tab_id is non-empty valid tab."
+        }
+
+        Postcondition
+        {
+            "Slint hides previous tab view (zero paint calls) and displays selected tab."
+        }
+
+        Process
+        {
+            1. "Update Slint root.active_tab property."
+            2. "For widgets on previous tab, trigger decrementSubscription in TopicRefCounter."
+            3. "For widgets on new tab, trigger incrementSubscription in TopicRefCounter."
+            4. "Slint re-renders active tab view."
+            5. "Return true."
+        }
+
+        Errors
+        {
+            "TabNotFound"
+        }
+    }
+}

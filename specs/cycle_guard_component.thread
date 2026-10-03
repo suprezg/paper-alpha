@@ -1,0 +1,105 @@
+Component CycleGuard
+{
+    !Note [[
+        Event Cycle Guard and Trace Logger intercepting stream envelopes on the Tokio Broadcast Bus.
+        Inspects hop_trace arrays on each envelope to detect and prevent circular publish-subscribe feedback loops,
+        logging cycle diagnostic reports and discarding unsafe packets in under 1 microsecond.
+    ]]
+
+    !Diagram CycleGuardFlow
+    [[
+        ```mermaid
+        flowchart TD
+            Envelope([Incoming StreamEnvelope]) --> Check[CycleGuard::verifyEnvelopeCycle]
+            Check --> Scan{Publisher ID in hop_trace?}
+            Scan -- Yes (Loop Detected) --> Log[CycleGuard::logCircularLoop]
+            Log --> Drop[Drop Packet & Emit Warning]
+            Scan -- No (Safe) --> Pass[Forward Envelope to Broadcast Pipeline]
+        ```
+    ]]
+
+    Invariants
+    {
+        "ZeroTolerantCycles: Any envelope failing cycle verification must be discarded immediately."
+        "TracePreservation: Every intermediate forwarding node must append its identifier to hop_trace."
+        "UltraLowLatency: Verification must complete in under 1 microsecond per envelope."
+    }
+
+    Model CycleReport
+    {
+        Type "Struct"
+        Members
+        {
+            "topic": "String"
+            "publisher_id": "String"
+            "detected_loop": "String"
+            "action": "String"
+        }
+    }
+
+    @diagram(CycleGuardFlow)
+    Contract verifyEnvelopeCycle
+    {
+        Signature "verifyEnvelopeCycle(publisher_id: String, hop_trace_str: String)" -> "Boolean"
+
+        Requires "hop_trace string is present in envelope metadata."
+
+        Ensures "Returns true if packet is safe; returns false if circular loop is detected."
+
+        Precondition
+        {
+            "publisher_id is non-empty string."
+        }
+
+        Postcondition
+        {
+            "Unsafe looped packets are marked for drop."
+        }
+
+        Process
+        {
+            1. "Parse hop_trace_str into list of node IDs."
+            2. "Check if publisher_id exists in list."
+            3. "If found, call logCircularLoop and return false."
+            4. "If not found, return true."
+        }
+
+        Errors
+        {
+            "CycleDetected"
+        }
+    }
+
+    @diagram(CycleGuardFlow)
+    Contract logCircularLoop
+    {
+        Signature "logCircularLoop(topic: String, publisher_id: String, hop_trace_str: String)" -> "CycleGuard::CycleReport"
+
+        Requires "Tracing subsystem is active."
+
+        Ensures "Logs diagnostic warning with full hop trace and returns CycleReport."
+
+        Precondition
+        {
+            "Loop condition confirmed."
+        }
+
+        Postcondition
+        {
+            "Diagnostic event recorded in Core tracing logs."
+        }
+
+        Process
+        {
+            1. "Format cycle warning message."
+            2. "Emit tracing::warn event with topic and hop trace."
+            3. "Construct CycleReport struct with action 'DROP_PACKET'."
+            4. "Return CycleReport."
+        }
+
+        Errors
+        {
+            "LoggingError"
+        }
+    }
+}

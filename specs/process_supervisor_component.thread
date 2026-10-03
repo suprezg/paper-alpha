@@ -1,0 +1,225 @@
+Component ProcessSupervisor
+{
+    !Note [[
+        Execution supervisor for native gRPC sidecar subprocesses and sandboxed WASM plugin modules.
+        Manages process lifecycle: launching sidecar subprocesses with captured stdio, executing WASM instances,
+        managing shared memory allocations and issuing WASM dealloc calls, and monitoring CPU/memory metrics via sysinfo.
+    ]]
+
+    !Diagram SupervisorFlow
+    [[
+        ```mermaid
+        flowchart TD
+            Cmd([Spawn Command]) --> Spawn[ProcessSupervisor::spawnSubprocess]
+            Spawn --> Track[Track PID in Active Process Table]
+            Track --> Monitor[ProcessSupervisor::monitorResources]
+            Term([Terminate Signal]) --> Terminate[ProcessSupervisor::terminateSubprocess]
+            Terminate --> SigTerm[SIGTERM / SIGKILL]
+            WasmAlloc([WASM Alloc]) --> Alloc[ProcessSupervisor::allocateGuestMemory]
+            WasmFree([WASM Free]) --> Free[ProcessSupervisor::deallocateGuestMemory]
+        ```
+    ]]
+
+    Invariants
+    {
+        "StdioPiping: Spawned subprocesses must have stdout and stderr piped to prevent process blocking."
+        "MemoryHygiene: Guest WASM allocations must be freed immediately after host read operations."
+        "LowOverheadMonitoring: System metrics polling must consume less than 1% CPU overhead."
+    }
+
+    Model ProcessMetrics
+    {
+        Type "Struct"
+        Members
+        {
+            "monitored_plugin_id": "String"
+            "pid": "Int"
+            "cpu_percentage": "String"
+            "memory_bytes_used": "Int"
+        }
+    }
+
+    Model PluginInitPayload
+    {
+        Type "Struct"
+        Members
+        {
+            "init_plugin_id": "String"
+            "init_instance_id": "UUID"
+            "storage_dir": "String"
+            "secure_var_references": "String"
+        }
+    }
+
+    @protocol(PluginIpcProtocol::GrpcChannelPipe)
+    @diagram(SupervisorFlow)
+    Contract spawnSubprocess
+    {
+        Signature "spawnSubprocess(plugin_id: String, exec_path: String, socket_path: String)" -> "Int"
+
+        Requires "Host OS supports process creation."
+
+        Ensures "Spawns native child process, passes socket path and secure variable handles, and returns child PID."
+
+        Precondition
+        {
+            "exec_path has executable permissions."
+            "socket_path is ready for connection."
+        }
+
+        Postcondition
+        {
+            "Child process is running and tracked in supervisor table."
+        }
+
+        Process
+        {
+            1. "Configure Command builder with exec_path and socket_path arguments."
+            2. "Configure stdout/stderr pipes to prevent blocking."
+            3. "Spawn child process using Tokio process API."
+            4. "Record PID in supervisor active map."
+            5. "Return child PID."
+        }
+
+        Errors
+        {
+            "SpawnFailed"
+            "ExecutableNotFound"
+        }
+    }
+
+    @protocol(PluginIpcProtocol::TeardownSignalPipe)
+    @diagram(SupervisorFlow)
+    Contract terminateSubprocess
+    {
+        Signature "terminateSubprocess(plugin_id: String, force: Boolean)" -> "Boolean"
+
+        Requires "Target process is tracked in active process map."
+
+        Ensures "Sends SIGTERM (or SIGKILL if force=true) to terminate plugin process."
+
+        Precondition
+        {
+            "plugin_id is currently active."
+        }
+
+        Postcondition
+        {
+            "Process is terminated and removed from supervisor map."
+        }
+
+        Process
+        {
+            1. "Lookup child process PID from active map."
+            2. "If force is false, send SIGTERM signal."
+            3. "If force is true, send SIGKILL."
+            4. "Await child exit status."
+            5. "Remove process entry from supervisor map."
+            6. "Return true."
+        }
+
+        Errors
+        {
+            "ProcessNotFound"
+            "KillFailed"
+        }
+    }
+
+    @diagram(SupervisorFlow)
+    Contract allocateGuestMemory
+    {
+        Signature "allocateGuestMemory(instance_id: String, size_bytes: Int)" -> "Int"
+
+        Requires "WASM instance is active."
+
+        Ensures "Invokes guest alloc export to allocate buffer space in guest linear memory."
+
+        Precondition
+        {
+            "size_bytes is greater than 0."
+        }
+
+        Postcondition
+        {
+            "Returns memory offset pointer in guest heap."
+        }
+
+        Process
+        {
+            1. "Lookup WASM instance by instance_id."
+            2. "Call guest exported function alloc(size_bytes)."
+            3. "Return memory pointer offset."
+        }
+
+        Errors
+        {
+            "AllocationFailed"
+            "OutOfMemory"
+        }
+    }
+
+    @diagram(SupervisorFlow)
+    Contract deallocateGuestMemory
+    {
+        Signature "deallocateGuestMemory(instance_id: String, ptr: Int, size_bytes: Int)" -> "Boolean"
+
+        Requires "WASM instance is active."
+
+        Ensures "Calls guest exported dealloc function to reclaim linear memory space."
+
+        Precondition
+        {
+            "ptr points to valid guest allocation."
+        }
+
+        Postcondition
+        {
+            "Allocated block is released back to guest allocator."
+        }
+
+        Process
+        {
+            1. "Lookup WASM instance."
+            2. "Invoke guest exported function dealloc(ptr, size_bytes)."
+            3. "Return true."
+        }
+
+        Errors
+        {
+            "DeallocFailed"
+        }
+    }
+
+    @diagram(SupervisorFlow)
+    Contract monitorResources
+    {
+        Signature "monitorResources(plugin_id: String)" -> "ProcessSupervisor::ProcessMetrics"
+
+        Requires "sysinfo subsystem is initialized."
+
+        Ensures "Queries CPU percentage and resident memory bytes for specified plugin process."
+
+        Precondition
+        {
+            "plugin_id is active."
+        }
+
+        Postcondition
+        {
+            "Returns ProcessMetrics struct."
+        }
+
+        Process
+        {
+            1. "Lookup PID for plugin_id."
+            2. "Query OS process statistics using sysinfo."
+            3. "Construct ProcessMetrics struct with CPU and memory usage."
+            4. "Return ProcessMetrics."
+        }
+
+        Errors
+        {
+            "ProcessNotFound"
+        }
+    }
+}

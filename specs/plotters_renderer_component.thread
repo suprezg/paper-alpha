@@ -1,0 +1,194 @@
+Component PlottersChartRenderer
+{
+    !Note [[
+        High-performance native charting engine leveraging Plotters and Slint integration.
+        Renders interactive 2D financial candlestick charts (OHLCV), technical oscillator lines (RSI, MACD),
+        bar charts, histograms, pie allocations, scatter correlation plots, and 3D volatility surface manifolds
+        directly into slint::SharedPixelBuffer textures for instant hardware-accelerated GPU display.
+    ]]
+
+    !Diagram PlottersFlow
+    [[
+        ```mermaid
+        flowchart TD
+            StreamData([Incoming Stream / Bar Data]) --> RenderCall{Chart Type?}
+            RenderCall -- Candlestick --> Candles[PlottersChartRenderer::renderFinancialCandles]
+            RenderCall -- Line / Oscillator --> Line[PlottersChartRenderer::renderOscillatorLine]
+            RenderCall -- Histogram / Pie / Scatter --> Stat[PlottersChartRenderer::renderStatisticalDistribution]
+            RenderCall -- 3D Surface --> ThreeD[PlottersChartRenderer::renderThreeDSurface]
+            Candles --> PixBuf[slint::SharedPixelBuffer]
+            Line --> PixBuf
+            Stat --> PixBuf
+            ThreeD --> PixBuf
+            PixBuf --> SlintImage[Slint Image Canvas Element]
+        ```
+    ]]
+
+    Invariants
+    {
+        "PixelBufferDirectMapping: Chart frames must render directly into Slint shared pixel memory without intermediate serialization."
+        "MultiChartTypeSupport: Must support Candlestick, Line, Bar, Histogram, Pie, Scatter, and 3D surface projections."
+        "HighFrameRatePaging: Viewport panning, zooming, and stream paint cycles must execute within 5 milliseconds."
+    }
+
+    Model ChartRenderConfig
+    {
+        Type "Struct"
+        Members
+        {
+            "chart_kind": "String"
+            "width_px": "Int"
+            "height_px": "Int"
+            "theme_palette": "String"
+        }
+    }
+
+    Model PixelBufferFrame
+    {
+        Type "Struct"
+        Members
+        {
+            "frame_width": "Int"
+            "frame_height": "Int"
+            "buffer_ready": "Boolean"
+        }
+    }
+
+    @diagram(PlottersFlow)
+    Contract renderFinancialCandles
+    {
+        Signature "renderFinancialCandles(data_points_json: String, config: PlottersChartRenderer::ChartRenderConfig)" -> "PlottersChartRenderer::PixelBufferFrame"
+
+        Requires "Plotters bitmap backend is initialized."
+
+        Ensures "Draws OHLCV candlestick bars and volume panels into Slint pixel buffer."
+
+        Precondition
+        {
+            "data_points_json contains valid OHLCV series."
+            "config dimensions are greater than 0."
+        }
+
+        Postcondition
+        {
+            "PixelBufferFrame is ready for display in Slint canvas."
+        }
+
+        Process
+        {
+            1. "Allocate or acquire Slint SharedPixelBuffer matching width and height."
+            2. "Initialize Plotters BitMapBackend on pixel buffer pointer."
+            3. "Configure price Y-axis and time X-axis coordinate scales."
+            4. "Draw candlestick rectangles (green for bullish, red for bearish) and wick lines."
+            5. "Draw bottom volume histogram bars."
+            6. "Return PixelBufferFrame."
+        }
+
+        Errors
+        {
+            "InvalidSeriesData"
+            "BufferAllocationFailed"
+        }
+    }
+
+    @diagram(PlottersFlow)
+    Contract renderOscillatorLine
+    {
+        Signature "renderOscillatorLine(series_data_json: String, config: PlottersChartRenderer::ChartRenderConfig)" -> "PlottersChartRenderer::PixelBufferFrame"
+
+        Requires "Plotters bitmap backend is initialized."
+
+        Ensures "Draws continuous indicator lines and overbought/oversold horizontal threshold bounds."
+
+        Precondition
+        {
+            "series_data_json contains numerical series."
+        }
+
+        Postcondition
+        {
+            "PixelBufferFrame is populated with oscillator line drawing."
+        }
+
+        Process
+        {
+            1. "Initialize Plotters context on SharedPixelBuffer."
+            2. "Draw horizontal threshold reference lines (e.g. 70 and 30 for RSI)."
+            3. "Draw continuous line series with anti-aliased path smoothing."
+            4. "Return PixelBufferFrame."
+        }
+
+        Errors
+        {
+            "DrawingError"
+        }
+    }
+
+    @diagram(PlottersFlow)
+    Contract renderStatisticalDistribution
+    {
+        Signature "renderStatisticalDistribution(dist_data_json: String, config: PlottersChartRenderer::ChartRenderConfig)" -> "PlottersChartRenderer::PixelBufferFrame"
+
+        Requires "Plotters chart backend is active."
+
+        Ensures "Renders bar charts, histogram bins, pie charts, or scatter plots into pixel buffer."
+
+        Precondition
+        {
+            "dist_data_json contains structured statistical records."
+        }
+
+        Postcondition
+        {
+            "PixelBufferFrame contains rendered chart graphic."
+        }
+
+        Process
+        {
+            1. "Initialize Plotters drawing context."
+            2. "If config.chart_kind is 'HistogramChart', compute bin frequencies and draw filled bars."
+            3. "If config.chart_kind is 'PieChart', compute angles and draw radial slices with legend."
+            4. "If config.chart_kind is 'ScatterPlotChart', draw point coordinates."
+            5. "Return PixelBufferFrame."
+        }
+
+        Errors
+        {
+            "UnsupportedChartType"
+        }
+    }
+
+    @diagram(PlottersFlow)
+    Contract renderThreeDSurface
+    {
+        Signature "renderThreeDSurface(matrix_data_json: String, config: PlottersChartRenderer::ChartRenderConfig)" -> "PlottersChartRenderer::PixelBufferFrame"
+
+        Requires "Plotters 3D projection engine is available."
+
+        Ensures "Projects and renders 3D mathematical volatility surface mesh onto 2D pixel buffer."
+
+        Precondition
+        {
+            "matrix_data_json contains 2D numerical grid matrix."
+        }
+
+        Postcondition
+        {
+            "PixelBufferFrame contains projected 3D surface plot."
+        }
+
+        Process
+        {
+            1. "Configure Plotters 3D chart context with elevation and azimuth projection angles."
+            2. "Generate surface polygon mesh from matrix values."
+            3. "Apply color gradient mapping based on Z-axis volatility values."
+            4. "Render wireframe and shaded polygons to buffer."
+            5. "Return PixelBufferFrame."
+        }
+
+        Errors
+        {
+            "ProjectionFailed"
+        }
+    }
+}

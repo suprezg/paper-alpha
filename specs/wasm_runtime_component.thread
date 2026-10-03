@@ -1,0 +1,167 @@
+Component WasmRuntime
+{
+    !Note [[
+        Embedded WebAssembly execution engine utilizing Wasmtime and Wasmtime-WASI.
+        Compiles and runs low-latency in-memory plugins (high-frequency indicators, low-latency math)
+        with zero IPC overhead using direct C-FFI memory pointer exchanges while strictly sandboxing OS resources.
+    ]]
+
+    !Diagram WasmFlow
+    [[
+        ```mermaid
+        flowchart TD
+            WasmBytes([WASM Binary File]) --> Load[WasmRuntime::loadModule]
+            Load --> Instance[InstanceId Created]
+            Params([FfiParams]) --> Exec[WasmRuntime::executeGuestFunction]
+            Instance --> Exec
+            Exec --> Result[FfiResult Output]
+            Result --> ReadHost[Host Reads Payload]
+            ReadHost --> Dealloc[WasmRuntime::deallocateGuestMemory]
+            Dealloc --> Freed[Guest Memory Recycled]
+        ```
+    ]]
+
+    Invariants
+    {
+        "StrictSandbox: All WASM modules must execute in isolated instance environments with no OS/disk/network access."
+        "BoundedLinearMemory: WASM linear memory space must be strictly bounded to prevent heap exhaustion."
+        "TwoWayDeallocation: The Core host MUST invoke guest dealloc immediately after reading FFI buffers."
+    }
+
+    Model InstanceId
+    {
+        Type "Struct"
+        Members
+        {
+            "instance_token": "String (Unique VM instance token)"
+        }
+    }
+
+    Model FfiParams
+    {
+        Type "Struct"
+        Members
+        {
+            "in_pointer": "Int"
+            "in_length": "Int"
+        }
+    }
+
+    Model FfiResult
+    {
+        Type "Struct"
+        Members
+        {
+            "out_pointer": "Int"
+            "out_length": "Int"
+        }
+    }
+
+    @diagram(WasmFlow)
+    Contract loadModule
+    {
+        Signature "loadModule(plugin_id: String, wasm_path: String)" -> "WasmRuntime::InstanceId"
+
+        Requires "Wasmtime engine and linker are initialized."
+
+        Ensures "Compiles WASM binary, links WASI imports, and creates isolated guest instance."
+
+        Precondition
+        {
+            "wasm_path points to valid .wasm binary."
+        }
+
+        Postcondition
+        {
+            "WASM instance is instantiated and registered in instance table."
+        }
+
+        Process
+        {
+            1. "Read WASM binary bytes from wasm_path."
+            2. "Compile module with Wasmtime."
+            3. "Configure sandboxed WASI context."
+            4. "Instantiate module and store instance handle."
+            5. "Return InstanceId."
+        }
+
+        Errors
+        {
+            "CompilationFailed"
+            "InstantiationError"
+        }
+    }
+
+    @diagram(WasmFlow)
+    Contract executeGuestFunction
+    {
+        Signature "executeGuestFunction(instance: WasmRuntime::InstanceId, export_name: String, params: WasmRuntime::FfiParams)" -> "WasmRuntime::FfiResult"
+
+        Requires "Target instance is loaded and active."
+
+        Ensures "Executes guest export function over C-FFI and returns pointer/length of output buffer."
+
+        Precondition
+        {
+            "export_name exists in guest exports."
+            "Memory pointer is within guest linear memory bounds."
+        }
+
+        Postcondition
+        {
+            "Host receives result pointer in guest linear memory."
+        }
+
+        Process
+        {
+            1. "Lookup WASM instance by instance.id."
+            2. "Write serialized Protobuf input bytes to guest memory buffer."
+            3. "Call exported function over C-FFI."
+            4. "Capture return pointer and length."
+            5. "Return FfiResult."
+        }
+
+        Errors
+        {
+            "FunctionNotFound"
+            "MemoryTrap"
+            "ExecutionTimeout"
+        }
+    }
+
+    @diagram(WasmFlow)
+    Contract deallocateGuestMemory
+    {
+        Signature "deallocateGuestMemory(instance: WasmRuntime::InstanceId, ptr: Int, length: Int)" -> "Boolean"
+
+        Requires "Guest module exports dealloc function."
+
+        Ensures "Releases guest linear memory block back to guest allocator, preventing memory leaks."
+
+        Precondition
+        {
+            "ptr is valid offset in guest memory."
+            "length is greater than 0."
+        }
+
+        Postcondition
+        {
+            "Memory address space is recycled by guest allocator."
+        }
+
+        Process
+        {
+            1. "Lookup WASM instance."
+            2. "Locate exported function dealloc(ptr, len)."
+            3. "Invoke guest dealloc export."
+            4. "Clear host buffer reference."
+            5. "Return true."
+        }
+
+        Errors
+        {
+            "DeallocExportMissing"
+            "InvalidPointer"
+        }
+    }
+}

@@ -1,0 +1,122 @@
+Component KeyResolverSdk
+{
+    !Note [[
+        Platform-linked client SDK running inside the plugin process space.
+        Implements the Opaque Key Reference Model: intercepts non-serializable ApiKeyRef handles in plugin code,
+        and right before writing bytes to outbound TCP sockets, queries Core's secure vault over local IPC to resolve
+        the raw credential, injecting it directly into the outgoing socket stream buffer without exposing it to
+        developer-facing code.
+    ]]
+
+    !Diagram KeyResolverFlow
+    [[
+        ```mermaid
+        flowchart TD
+            Code([Plugin Logic passes ApiKeyRef]) --> Sdk[SDK Request Interceptor]
+            Sdk --> Intercept[KeyResolverSdk::interceptSocketStream]
+            Intercept --> QueryCore[KeyResolverSdk::resolveRefVariable over local IPC]
+            QueryCore --> CheckAcl{Core Checks ACL}
+            CheckAcl -- Allowed --> ReturnRaw[Return Raw Decrypted Bytes]
+            CheckAcl -- Denied --> Error[Access Denied Error]
+            ReturnRaw --> Inject[Inject Decrypted Key into Socket Buffer]
+            Inject --> Wipe[Wipe Key from Memory]
+            Wipe --> Transmit[Transmit over TCP Socket to Exchange]
+        ```
+    ]]
+
+    Invariants
+    {
+        "OpaqueHandles: High-level plugin code must only receive opaque ApiKeyRef handles without dereference methods."
+        "TransientExposure: Raw decrypted credential bytes must only exist transiently at the raw socket buffer write level."
+        "ImmediateMemoryWipe: Decrypted credentials must be zeroized in RAM immediately after socket transmission."
+    }
+
+    Model ApiKeyRef
+    {
+        Type "Struct"
+        Members
+        {
+            "reference_id": "UUID"
+            "key_name": "String"
+        }
+    }
+
+    Model DecryptedKeyBytes
+    {
+        Type "Struct"
+        Members
+        {
+            "raw_key_string": "String"
+        }
+    }
+
+    @diagram(KeyResolverFlow)
+    Contract resolveRefVariable
+    {
+        Signature "resolveRefVariable(ref: KeyResolverSdk::ApiKeyRef)" -> "KeyResolverSdk::DecryptedKeyBytes"
+
+        Requires "Local gRPC IPC connection to Core host is open."
+
+        Ensures "Queries Core secure vault, verifies ACL authorization, and returns decrypted key bytes."
+
+        Precondition
+        {
+            "ref.reference_id represents valid UUID."
+        }
+
+        Postcondition
+        {
+            "Decrypted key is available in transient memory buffer."
+        }
+
+        Process
+        {
+            1. "Send resolve_secret RPC over local UDS socket to Core."
+            2. "Core verifies plugin ACL in variable_acls table."
+            3. "Core decrypts key via EncryptionEngine::decryptData."
+            4. "Receive decrypted key bytes in memory."
+            5. "Return DecryptedKeyBytes."
+        }
+
+        Errors
+        {
+            "Unauthorized"
+            "KeyNotFound"
+        }
+    }
+
+    @diagram(KeyResolverFlow)
+    Contract interceptSocketStream
+    {
+        Signature "interceptSocketStream(ref: KeyResolverSdk::ApiKeyRef, raw_request_buffer: String)" -> "String"
+
+        Requires "Network TCP socket client is active in SDK."
+
+        Ensures "Replaces header reference placeholder with decrypted credential and sends buffer."
+
+        Precondition
+        {
+            "raw_request_buffer contains reference placeholder."
+        }
+
+        Postcondition
+        {
+            "Socket stream is populated with authentication header."
+        }
+
+        Process
+        {
+            1. "Call resolveRefVariable(ref) to obtain decrypted bytes."
+            2. "Substitute reference placeholder in raw_request_buffer with real key."
+            3. "Write substituted buffer to outgoing TCP socket stream."
+            4. "Zeroize temporary key memory buffer immediately."
+            5. "Return modified stream buffer status."
+        }
+
+        Errors
+        {
+            "InjectionFailed"
+            "SocketWriteError"
+        }
+    }
+}

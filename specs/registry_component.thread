@@ -1,0 +1,204 @@
+Component RegistryService
+{
+    !Note [[
+        In-memory, thread-safe central metadata store backed by DashMap lock-free concurrent hash maps.
+        Stores global context variables (e.g. ActiveAsset), active plugin configurations, and active subscription
+        reference counts. The Registry strictly coordinates context and metadata; it never stores or caches
+        high-frequency streaming payloads.
+    ]]
+
+    !Diagram RegistryFlow
+    [[
+        ```mermaid
+        flowchart TD
+            Caller([UI or Core Action]) --> Action{Action?}
+            Action -- Set Context --> SetCtx[RegistryService::setContext]
+            Action -- Get Context --> GetCtx[RegistryService::getContext]
+            Action -- Register --> RegPlug[RegistryService::registerPlugin]
+            Action -- Unregister --> UnregPlug[RegistryService::unregisterPlugin]
+            SetCtx --> Mutation[Trigger SlintUiProtocol::SlintContextBindingPipe]
+        ```
+    ]]
+
+    Invariants
+    {
+        "UniqueIdentity: All registered plugins must possess a unique plugin_id."
+        "FastLookups: Global context variables must represent lightweight data structures and never store tick streams."
+        "LockFreeAccess: Concurrent read and write access across distinct keys must remain non-blocking."
+    }
+
+    Model PluginMetadata
+    {
+        Type "Struct"
+        Members
+        {
+            "reg_plugin_id": "String (min_length=1, max_length=128)"
+            "reg_instance_id": "UUID"
+            "reg_category": "String"
+            "is_enabled": "Boolean"
+            "secure_vars_mapping": "String"
+        }
+    }
+
+    Model ContextValue
+    {
+        Type "Struct"
+        Members
+        {
+            "context_key": "String (min_length=1, max_length=128)"
+            "value_json": "String"
+            "context_timestamp_ms": "Int"
+        }
+    }
+
+    Model ContextChangePayload
+    {
+        Type "Struct"
+        Members
+        {
+            "mutation_key": "String"
+            "mutation_value": "String"
+            "mutation_timestamp_ms": "Int"
+        }
+    }
+
+    @protocol(SlintUiProtocol::SlintContextBindingPipe)
+    @diagram(RegistryFlow)
+    Contract setContext
+    {
+        Signature "setContext(key: String, value_json: String)" -> "Boolean"
+
+        Requires "Caller possesses write authorization for context mutation."
+
+        Ensures "Updates in-memory DashMap context mapping and triggers context change fan-out."
+
+        Precondition
+        {
+            "Key string is non-empty UTF-8 ASCII identifier."
+            "Value JSON is well-formed."
+        }
+
+        Postcondition
+        {
+            "Subsequent getContext queries return the new context value."
+            "SlintUiProtocol::SlintContextBindingPipe emits change event."
+        }
+
+        Process
+        {
+            1. "Acquire write segment lock for target key in DashMap."
+            2. "Store updated JSON string value and timestamp."
+            3. "Release segment lock."
+            4. "Trigger SlintUiProtocol::SlintContextBindingPipe to notify RouterService."
+            5. "Return true."
+        }
+
+        Errors
+        {
+            "InvalidContextKey"
+            "SerializationError"
+        }
+    }
+
+    @diagram(RegistryFlow)
+    Contract getContext
+    {
+        Signature "getContext(key: String)" -> "RegistryService::ContextValue"
+
+        Requires "Registry service is initialized."
+
+        Ensures "Returns current context value struct from in-memory DashMap."
+
+        Precondition
+        {
+            "Key string is non-empty."
+        }
+
+        Postcondition
+        {
+            "Context value is retrieved without blocking write operations on other keys."
+        }
+
+        Process
+        {
+            1. "Lookup key in concurrent DashMap."
+            2. "If missing, return empty ContextValue."
+            3. "Clone value into ContextValue struct."
+            4. "Return ContextValue."
+        }
+
+        Errors
+        {
+            "KeyNotFound"
+        }
+    }
+
+    @storage(CoreStorage::plugin_configs)
+    @diagram(RegistryFlow)
+    Contract registerPlugin
+    {
+        Signature "registerPlugin(plugin: RegistryService::PluginMetadata)" -> "Boolean"
+
+        Requires "Plugin package has successfully passed structural manifest validation."
+
+        Ensures "Registers plugin metadata in active memory map and updates CoreStorage::plugin_configs."
+
+        Precondition
+        {
+            "plugin_id is unique and not currently registered."
+        }
+
+        Postcondition
+        {
+            "Plugin becomes available for routing and lifecycle operations."
+        }
+
+        Process
+        {
+            1. "Check for existing plugin_id in DashMap registry."
+            2. "If exists, return error DuplicatePluginId."
+            3. "Insert plugin metadata into active plugins map."
+            4. "Sync active state to CoreStorage::plugin_configs table."
+            5. "Return true."
+        }
+
+        Errors
+        {
+            "DuplicatePluginId"
+            "InvalidMetadata"
+        }
+    }
+
+    @storage(CoreStorage::plugin_configs)
+    @diagram(RegistryFlow)
+    Contract unregisterPlugin
+    {
+        Signature "unregisterPlugin(plugin_id: String)" -> "Boolean"
+
+        Requires "Plugin is currently registered in DashMap."
+
+        Ensures "Removes plugin from active registry and disables state in storage."
+
+        Precondition
+        {
+            "plugin_id is non-empty."
+        }
+
+        Postcondition
+        {
+            "Plugin route is removed from router."
+        }
+
+        Process
+        {
+            1. "Remove plugin entry from active plugins map."
+            2. "Update is_enabled flag to false in CoreStorage::plugin_configs."
+            3. "Return true."
+        }
+
+        Errors
+        {
+            "PluginNotFound"
+        }
+    }
+}

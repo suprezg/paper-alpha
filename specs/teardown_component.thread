@@ -1,0 +1,157 @@
+Component TeardownEngine
+{
+    !Note [[
+        Coordinates the structured 5-phase graceful teardown sequence when the user closes the application:
+        Phase 1: Intercept window close and notify UI.
+        Phase 2: Broadcast Shutdown RPC to child processes and start 2000ms grace timer.
+        Phase 3: Force-kill lingering sidecars with SIGKILL and unload WASM modules.
+        Phase 4: Flush DashMap registry and WAL database writes to disk, close channels.
+        Phase 5: Safely exit the Tauri application host.
+    ]]
+
+    !Diagram TeardownFlow
+    [[
+        ```mermaid
+        flowchart TD
+            Exit([Window Close Intercepted]) --> Phase1[Phase 1: Lock UI & Broadcast app:shutting_down]
+            Phase1 --> Phase2[Phase 2: Broadcast Shutdown RPC with 2000ms Timer]
+            Phase2 --> Check{All Exited?}
+            Check -- No / Timeout --> Phase3[Phase 3: SIGKILL Lingering Processes & Unload WASM]
+            Check -- Yes --> Phase4[Phase 4: Flush DashMap & SQLCipher WAL Queue]
+            Phase3 --> Phase4
+            Phase4 --> Phase5[Phase 5: Exit Tauri Application]
+        ```
+    ]]
+
+    Invariants
+    {
+        "OrderedPhases: Teardown phases must execute strictly in sequential order."
+        "DatabaseFlushLast: Database connections and WAL queue must flush after all plugin communication stops."
+        "HardTimeout: Lingering processes must be forcibly killed if they exceed the 2000ms grace window."
+    }
+
+    Model ShutdownReport
+    {
+        Type "Struct"
+        Members
+        {
+            "terminated_count": "Int"
+            "force_killed_count": "Int"
+            "is_clean_shutdown": "Boolean"
+        }
+    }
+
+    Model TeardownSignalPayload
+    {
+        Type "Struct"
+        Members
+        {
+            "grace_period_ms": "Int"
+            "force_kill_on_timeout": "Boolean"
+        }
+    }
+
+    @protocol(PluginIpcProtocol::TeardownSignalPipe)
+    @diagram(TeardownFlow)
+    Contract triggerShutdown
+    {
+        Signature "triggerShutdown()" -> "TeardownEngine::ShutdownReport"
+
+        Requires "Tauri application context is active."
+
+        Ensures "Executes complete 5-phase shutdown sequence and exits application cleanly."
+
+        Precondition
+        {
+            "Application exit event has been triggered."
+        }
+
+        Postcondition
+        {
+            "Zero zombie processes remain and database files are safely committed."
+        }
+
+        Process
+        {
+            1. "Cancel window close event temporarily and emit 'app:shutting_down' to React UI."
+            2. "Broadcast Shutdown RPC to all registered plugins via PluginIpcProtocol::TeardownSignalPipe."
+            3. "Start 2000ms grace period timer."
+            4. "Monitor child process exits."
+            5. "If timer expires, call terminateLingeringProcesses to send SIGKILL."
+            6. "Flush DashMap state to CoreStorage database."
+            7. "Drain and close DatabaseWalQueue."
+            8. "Call app_handle.exit(0)."
+            9. "Return ShutdownReport."
+        }
+
+        Errors
+        {
+            "ShutdownTimeout"
+        }
+    }
+
+    @diagram(TeardownFlow)
+    Contract signalPluginShutdown
+    {
+        Signature "signalPluginShutdown(plugin_id: String)" -> "Boolean"
+
+        Requires "Plugin is active in supervisor map."
+
+        Ensures "Sends Shutdown RPC signal to specific plugin subprocess."
+
+        Precondition
+        {
+            "plugin_id is non-empty."
+        }
+
+        Postcondition
+        {
+            "Plugin initiates graceful local shutdown."
+        }
+
+        Process
+        {
+            1. "Send Shutdown RPC to plugin over gRPC channel."
+            2. "Await acknowledge."
+            3. "Return true."
+        }
+
+        Errors
+        {
+            "SignalFailed"
+        }
+    }
+
+    @diagram(TeardownFlow)
+    Contract terminateLingeringProcesses
+    {
+        Signature "terminateLingeringProcesses()" -> "Int"
+
+        Requires "Process supervisor map is accessible."
+
+        Ensures "Iterates remaining alive sidecar PIDs and issues SIGKILL."
+
+        Precondition
+        {
+            "Grace period timer has expired."
+        }
+
+        Postcondition
+        {
+            "All child processes are terminated."
+        }
+
+        Process
+        {
+            1. "Scan supervisor active processes map."
+            2. "For each active process, issue SIGKILL."
+            3. "Count number of forced terminations."
+            4. "Return count of killed processes."
+        }
+
+        Errors
+        {
+            "KillFailed"
+        }
+    }
+}

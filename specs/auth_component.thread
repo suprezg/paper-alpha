@@ -1,0 +1,279 @@
+Component AuthenticationService
+{
+    !Note [[
+        Central authentication coordinator for Paper-Alpha.
+        Manages local user identity verification, master Argon2id password hash validation,
+        session token generation, account registration, emergency single-use backup recovery code
+        consumption, and mnemonic recovery phrase verification. Coordinates with EncryptionEngine
+        to derive database encryption keys and unlock the SQLCipher encrypted storage pool.
+    ]]
+
+    !Diagram AuthFlow
+    [[
+        ```mermaid
+        flowchart TD
+            User([User Login / Register / Recover]) --> ReqPipe[AuthenticationProtocol::UserAuthCommandPipe]
+            ReqPipe --> AuthSvc{Action Type?}
+            AuthSvc -- Login --> Login[AuthenticationService::authenticateUser]
+            Login --> DeriveKey[EncryptionEngine::deriveKey]
+            DeriveKey --> InitDB[DatabaseService::initialize]
+            InitDB --> IssueToken[Issue AuthSessionToken]
+            AuthSvc -- Register --> Register[AuthenticationService::registerUser]
+            Register --> GenKeys[Generate Backup Codes & Phrase]
+            GenKeys --> SaveDB[Persist in CoreStorage::users & backup_codes]
+            AuthSvc -- BackupCode --> AuthCode[AuthenticationService::authenticateWithBackupCode]
+            AuthCode --> MarkCode[Mark Code Consumed in CoreStorage::backup_codes]
+            MarkCode --> IssueToken
+            AuthSvc -- Phrase --> AuthPhrase[AuthenticationService::recoverWithPhrase]
+            AuthPhrase --> MarkPhrase[Mark Phrase Consumed in CoreStorage::recovery_phrases]
+            MarkPhrase --> IssueToken
+            IssueToken --> TokenPipe[AuthenticationProtocol::SessionTokenEventPipe]
+        ```
+    ]]
+
+    Invariants
+    {
+        "Argon2idSecurity: Password hashes must be derived and verified using memory-hard Argon2id with random salts."
+        "SingleUseCodes: Emergency backup codes and recovery phrases must be permanently invalidated upon successful consumption."
+        "SessionIntegrity: An active AuthSessionToken must be cryptographically bound to an initialized SQLCipher database pool."
+    }
+
+    Model AuthCredentials
+    {
+        Type "Struct"
+        Members
+        {
+            "auth_username": "String"
+            "auth_password": "String"
+        }
+    }
+
+    Model AuthSessionToken
+    {
+        Type "Struct"
+        Members
+        {
+            "session_token": "String"
+            "session_user_id": "String"
+            "token_expires_at": "Date"
+        }
+    }
+
+    Model RecoveryResult
+    {
+        Type "Struct"
+        Members
+        {
+            "recovery_success": "Boolean"
+            "recovery_message": "String"
+            "consumed_code": "String"
+        }
+    }
+
+    @component(EncryptionEngine::deriveKey)
+    @component(DatabaseService::initialize)
+    @storage(CoreStorage::users)
+    @diagram(AuthFlow)
+    Contract authenticateUser
+    {
+        Signature "authenticateUser(credentials: AuthenticationService::AuthCredentials)" -> "AuthenticationService::AuthSessionToken"
+
+        Requires "Database engine is accessible."
+
+        Ensures "Verifies user credentials with Argon2id, unlocks SQLCipher database pool, and returns session token."
+
+        Precondition
+        {
+            "credentials.auth_username is non-empty string."
+            "credentials.auth_password is non-empty string."
+        }
+
+        Postcondition
+        {
+            "Valid AuthSessionToken is issued and database pool is active."
+        }
+
+        Process
+        {
+            1. "Query CoreStorage::users for record matching credentials.auth_username."
+            2. "If record does not exist, return UserNotFound error."
+            3. "Derive key from password using EncryptionEngine::deriveKey."
+            4. "Verify derived hash against stored password_hash in users table."
+            5. "If password verification fails, return InvalidCredentials error."
+            6. "Call DatabaseService::initialize with derived key to unlock SQLCipher pool."
+            7. "Generate secure random session token UUID."
+            8. "Return AuthSessionToken."
+        }
+
+        Errors
+        {
+            "UserNotFound"
+            "InvalidCredentials"
+            "DatabaseInitError"
+        }
+    }
+
+    @component(EncryptionEngine::deriveKey)
+    @component(DatabaseWalQueue::enqueueWrite)
+    @storage(CoreStorage::users)
+    @storage(CoreStorage::backup_codes)
+    @storage(CoreStorage::recovery_phrases)
+    @diagram(AuthFlow)
+    Contract registerUser
+    {
+        Signature "registerUser(credentials: AuthenticationService::AuthCredentials)" -> "Boolean"
+
+        Requires "Database write queue is active."
+
+        Ensures "Creates new user profile, derives Argon2id hash, and generates 10 backup codes plus recovery phrase."
+
+        Precondition
+        {
+            "credentials.auth_username has length between 3 and 64 characters."
+            "credentials.auth_password has length of at least 8 characters."
+        }
+
+        Postcondition
+        {
+            "User profile and security credentials are created in CoreStorage."
+        }
+
+        Process
+        {
+            1. "Check CoreStorage::users to verify credentials.auth_username is unique."
+            2. "If username exists, return DuplicateUsername error."
+            3. "Hash password using EncryptionEngine::deriveKey with Argon2id."
+            4. "Enqueue insert into CoreStorage::users via DatabaseWalQueue."
+            5. "Generate 10 single-use emergency backup codes and enqueue to CoreStorage::backup_codes."
+            6. "Generate 12-word mnemonic recovery phrase and enqueue to CoreStorage::recovery_phrases."
+            7. "Return true."
+        }
+
+        Errors
+        {
+            "DuplicateUsername"
+            "WeakPassword"
+            "StorageError"
+        }
+    }
+
+    @component(DatabaseWalQueue::enqueueWrite)
+    @storage(CoreStorage::users)
+    @storage(CoreStorage::backup_codes)
+    @diagram(AuthFlow)
+    Contract authenticateWithBackupCode
+    {
+        Signature "authenticateWithBackupCode(target_username: String, code_candidate: String)" -> "AuthenticationService::AuthSessionToken"
+
+        Requires "Database pool is initialized."
+
+        Ensures "Validates unconsumed backup code, permanently marks it consumed, and issues session token."
+
+        Precondition
+        {
+            "target_username is non-empty string."
+            "code_candidate matches backup code format."
+        }
+
+        Postcondition
+        {
+            "Backup code is marked is_consumed=true in CoreStorage::backup_codes."
+        }
+
+        Process
+        {
+            1. "Lookup user record in CoreStorage::users for target_username."
+            2. "If user not found, return UserNotFound."
+            3. "Query CoreStorage::backup_codes for matching user_id and code_hash where is_consumed=false."
+            4. "If no matching unconsumed code found, return InvalidBackupCode."
+            5. "Enqueue update setting is_consumed=true in CoreStorage::backup_codes via DatabaseWalQueue."
+            6. "Generate new AuthSessionToken."
+            7. "Return AuthSessionToken."
+        }
+
+        Errors
+        {
+            "UserNotFound"
+            "InvalidBackupCode"
+            "CodeAlreadyConsumed"
+        }
+    }
+
+    @component(DatabaseWalQueue::enqueueWrite)
+    @storage(CoreStorage::users)
+    @storage(CoreStorage::recovery_phrases)
+    @diagram(AuthFlow)
+    Contract recoverWithPhrase
+    {
+        Signature "recoverWithPhrase(target_username: String, phrase_candidate: String)" -> "AuthenticationService::AuthSessionToken"
+
+        Requires "Database pool is initialized."
+
+        Ensures "Validates unconsumed recovery phrase, permanently marks it consumed, and issues session token."
+
+        Precondition
+        {
+            "target_username is non-empty string."
+            "phrase_candidate contains valid mnemonic words."
+        }
+
+        Postcondition
+        {
+            "Recovery phrase is marked is_consumed=true in CoreStorage::recovery_phrases."
+        }
+
+        Process
+        {
+            1. "Lookup user record in CoreStorage::users for target_username."
+            2. "If user not found, return UserNotFound."
+            3. "Query CoreStorage::recovery_phrases for user_id where is_consumed=false."
+            4. "Verify phrase_candidate against stored phrase_hash."
+            5. "If phrase invalid or already consumed, return InvalidRecoveryPhrase."
+            6. "Enqueue update setting is_consumed=true in CoreStorage::recovery_phrases via DatabaseWalQueue."
+            7. "Generate new AuthSessionToken."
+            8. "Return AuthSessionToken."
+        }
+
+        Errors
+        {
+            "UserNotFound"
+            "InvalidRecoveryPhrase"
+            "PhraseAlreadyConsumed"
+        }
+    }
+
+    @component(DatabaseService::flushWrites)
+    @diagram(AuthFlow)
+    Contract logoutUser
+    {
+        Signature "logoutUser(token_value: String)" -> "Boolean"
+
+        Requires "An active user session exists."
+
+        Ensures "Invalidates active session token, wipes decrypted credentials from RAM, and flushes database writes."
+
+        Precondition
+        {
+            "token_value is non-empty string."
+        }
+
+        Postcondition
+        {
+            "User session is terminated and memory is zeroized."
+        }
+
+        Process
+        {
+            1. "Locate session by token_value in active session registry."
+            2. "Remove session token from memory map."
+            3. "Zeroize decrypted master keys and credential buffers in RAM."
+            4. "Trigger DatabaseService::flushWrites to sync pending WAL entries."
+            5. "Return true."
+        }
+
+        Errors
+        {
+            "SessionNotFound"
+        }
+    }
+}

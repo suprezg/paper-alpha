@@ -1,0 +1,242 @@
+Feature UserAuthentication
+{
+    !Note [[
+        Governs user identity verification, secure local registration, master Argon2id key derivation,
+        generation of 10 single-use emergency backup recovery codes, one-time recovery phrases,
+        and password recovery workflows for the Paper-Alpha desktop application.
+        Delegates all authentication operations to AuthenticationService and UserAuthCommandPipe.
+    ]]
+
+    !Diagram AuthSequence
+    [[
+        ```mermaid
+        sequenceDiagram
+            autonumber
+            actor User as Trader
+            participant UI as SlintAuthView
+            participant Pipe as AuthenticationProtocol::UserAuthCommandPipe
+            participant Auth as AuthenticationService::authenticateUser
+            participant Enc as EncryptionEngine::deriveKey
+            participant DB as DatabaseService::initialize
+            participant Store as CoreStorage::users
+
+            User->>UI: Enters username & password
+            UI->>Pipe: Dispatches AuthCredentials
+            Pipe->>Auth: authenticateUser(credentials)
+            Auth->>Store: Lookup user record
+            Auth->>Enc: deriveKey(username, password)
+            Enc-->>Auth: DerivedKey handle
+            Auth->>DB: initialize(DerivedKey)
+            DB-->>Auth: Connection Pool Open
+            Auth-->>UI: AuthSessionToken
+            UI-->>User: Redirect to Application Dashboard
+        ```
+    ]]
+
+    Background
+    {
+        Given "the Paper-Alpha desktop application is launched"
+        And "the local encrypted database system is available"
+    }
+
+    Rule "User Login and Credential Verification"
+    {
+        @component(AuthenticationService::authenticateUser)
+        @protocol(AuthenticationProtocol::UserAuthCommandPipe)
+        @component(EncryptionEngine::deriveKey)
+        @component(DatabaseService::initialize)
+        @storage(CoreStorage::users)
+        @diagram(AuthSequence)
+        Scenario SuccessfulUserLogin
+        {
+            Title "Successful user login with valid credentials"
+
+            Given "a registered user exists with username 'quant_trader' and password 'SecurePass123!'"
+            When "the user enters username 'quant_trader' and password 'SecurePass123!'"
+            And "clicks the 'Login' button"
+            Then "the system authenticates the user and opens the encrypted database pool"
+            And "the application redirects to the main workspace dashboard"
+        }
+
+        @component(AuthenticationService::authenticateUser)
+        @storage(CoreStorage::users)
+        Scenario UnsuccessfulLoginWrongPassword
+        {
+            Title "Unsuccessful user login with invalid password"
+
+            Given "a registered user exists with username 'quant_trader'"
+            When "the user enters username 'quant_trader' and password 'WrongPassword!'"
+            And "clicks the 'Login' button"
+            Then "an error message 'Invalid credentials' is displayed"
+            And "the user remains on the authentication screen"
+        }
+
+        @component(AuthenticationService::authenticateUser)
+        @storage(CoreStorage::users)
+        Scenario UnsuccessfulLoginUnknownUser
+        {
+            Title "Unsuccessful user login with non-existent username"
+
+            Given "no registered user exists with username 'unknown_user'"
+            When "the user enters username 'unknown_user' and password 'AnyPass123!'"
+            And "clicks the 'Login' button"
+            Then "an error message 'Invalid credentials' is displayed"
+            And "the user remains on the authentication screen"
+        }
+    }
+
+    Rule "Account Registration and Security Key Generation"
+    {
+        @component(AuthenticationService::registerUser)
+        @component(EncryptionEngine::deriveKey)
+        @component(DatabaseWalQueue::enqueueWrite)
+        @storage(CoreStorage::users)
+        @storage(CoreStorage::backup_codes)
+        @storage(CoreStorage::recovery_phrases)
+        Scenario SuccessfulAccountRegistration
+        {
+            Title "Successful account registration generates 10 backup codes and recovery phrase"
+
+            Given "no registered user exists with username 'new_trader'"
+            When "the user fills the registration form with username 'new_trader' and password 'NewPass456!'"
+            And "clicks the 'Create Account' button"
+            Then "the profile is created in CoreStorage::users"
+            And "a security keys dialog appears displaying 10 single-use backup codes"
+            And "the dialog displays a one-time recovery phrase"
+            And "advice text regarding secure storage is shown"
+        }
+
+        @component(AuthenticationService::registerUser)
+        @storage(CoreStorage::users)
+        Scenario RegistrationDuplicateUsername
+        {
+            Title "Unsuccessful registration when username already exists"
+
+            Given "a registered user already exists with username 'existing_trader'"
+            When "the user attempts to register with username 'existing_trader'"
+            And "clicks the 'Create Account' button"
+            Then "an error message 'Username already taken' is displayed"
+            And "the user remains on the registration form"
+        }
+
+        @component(AuthenticationService::registerUser)
+        @storage(CoreStorage::users)
+        Scenario RegistrationEmptyFieldsValidation
+        {
+            Title "Validation prevents registration with empty username or password"
+
+            Given "the registration form is displayed"
+            When "the user submits an empty username or empty password"
+            Then "a validation error 'Required fields missing' is displayed"
+            And "no database record is created"
+        }
+
+        @storage(CoreStorage::backup_codes)
+        @storage(CoreStorage::recovery_phrases)
+        Scenario CopySecurityKeysToClipboard
+        {
+            Title "User copies backup codes and recovery phrase to clipboard"
+
+            Given "the security keys dialog is displayed after registration"
+            When "the user clicks 'Copy' on the backup codes section"
+            Then "all 10 backup codes are copied to the system clipboard"
+            When "the user clicks 'Copy' on the recovery phrase section"
+            Then "the one-time recovery phrase is copied to the system clipboard"
+        }
+
+        @storage(CoreStorage::users)
+        Scenario CloseSecurityKeysDialog
+        {
+            Title "Closing security keys dialog redirects to login"
+
+            Given "the security keys dialog is open"
+            When "the user clicks 'Okay' on the dialog"
+            Then "the modal closes"
+            And "the user is redirected to the login screen"
+        }
+    }
+
+    Rule "Account Recovery via Backup Codes"
+    {
+        @component(AuthenticationService::authenticateWithBackupCode)
+        @component(DatabaseWalQueue::enqueueWrite)
+        @storage(CoreStorage::backup_codes)
+        Scenario ForgotPasswordValidBackupCode
+        {
+            Title "Successful login using valid unused backup code"
+
+            Given "user 'quant_trader' has an unused backup code 'BC-1234-5678'"
+            When "the user selects 'Forgot Password' and enters username 'quant_trader'"
+            And "provides backup code 'BC-1234-5678'"
+            Then "the system authenticates the user"
+            And "the backup code is permanently marked as consumed in CoreStorage::backup_codes"
+            And "the dashboard is displayed"
+        }
+
+        @component(AuthenticationService::authenticateWithBackupCode)
+        @storage(CoreStorage::backup_codes)
+        Scenario ForgotPasswordUsedBackupCode
+        {
+            Title "Failed recovery using already consumed backup code"
+
+            Given "user 'quant_trader' previously consumed backup code 'BC-1234-5678'"
+            When "the user attempts recovery with backup code 'BC-1234-5678'"
+            Then "an error 'Invalid backup code' is displayed"
+            And "access is denied"
+        }
+
+        @component(AuthenticationService::authenticateWithBackupCode)
+        @storage(CoreStorage::backup_codes)
+        Scenario ForgotPasswordInvalidCode
+        {
+            Title "Failed recovery using malformed or wrong backup code"
+
+            Given "user 'quant_trader' is on the Forgot Password screen"
+            When "the user enters non-existent backup code 'INVALID-CODE-99'"
+            Then "an error 'Invalid backup code' is displayed"
+            And "the user remains unauthenticated"
+        }
+    }
+
+    Rule "Account Recovery via Recovery Phrase"
+    {
+        @component(AuthenticationService::recoverWithPhrase)
+        @component(DatabaseWalQueue::enqueueWrite)
+        @storage(CoreStorage::recovery_phrases)
+        Scenario AccountRecoveryValidPhrase
+        {
+            Title "Successful account recovery with valid one-time phrase"
+
+            Given "user 'quant_trader' has unused recovery phrase 'apple banana cherry dragon eagle falcon'"
+            When "the user selects 'Recover Account' and enters username 'quant_trader'"
+            And "enters recovery phrase 'apple banana cherry dragon eagle falcon'"
+            Then "the system authenticates the user"
+            And "the recovery phrase is marked as consumed in CoreStorage::recovery_phrases"
+            And "the dashboard is displayed"
+        }
+
+        @component(AuthenticationService::recoverWithPhrase)
+        @storage(CoreStorage::recovery_phrases)
+        Scenario AccountRecoveryUsedPhrase
+        {
+            Title "Failed recovery using previously consumed recovery phrase"
+
+            Given "user 'quant_trader' has already consumed their recovery phrase"
+            When "the user attempts recovery with the old phrase"
+            Then "an error 'Invalid recovery phrase' is displayed"
+            And "access is denied"
+        }
+
+        @component(AuthenticationService::recoverWithPhrase)
+        @storage(CoreStorage::recovery_phrases)
+        Scenario AccountRecoveryInvalidPhrase
+        {
+            Title "Failed recovery using invalid phrase words"
+
+            Given "user 'quant_trader' is on the Recover Account screen"
+            When "the user enters wrong phrase 'wrong random phrase test words'"
+            Then "an error 'Invalid recovery phrase' is displayed"
+            And "the user remains unauthenticated"
+        }
+    }
+}

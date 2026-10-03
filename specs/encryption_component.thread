@@ -1,0 +1,204 @@
+Component EncryptionEngine
+{
+    !Note [[
+        Cryptographic security vault managing password hashing, key derivation, and credential encryption/decryption.
+        Utilizes Argon2id for master profile passwords and AES-256-GCM for credential vaults.
+        Locks derived keys and decrypted secrets in non-swappable RAM blocks (mlock) to prevent leakage to swap disks.
+    ]]
+
+    !Diagram EncryptionFlow
+    [[
+        ```mermaid
+        flowchart TD
+            Pass([Password & Salt]) --> Derive[EncryptionEngine::deriveKey]
+            Derive --> Key[DerivedKey in Locked RAM]
+            Key --> Lock[EncryptionEngine::lockMemory]
+            Plaintext([Raw Secret Bytes]) --> Encrypt[EncryptionEngine::encryptData]
+            Key --> Encrypt
+            Encrypt --> Cipher[EncryptedData with Nonce & Tag]
+            Cipher --> Decrypt[EncryptionEngine::decryptData]
+            Key --> Decrypt
+            Decrypt --> DecryptedData[DecryptedData in RAM]
+        ```
+    ]]
+
+    Invariants
+    {
+        "MemoryPinning: All derived encryption keys and raw credentials must be pinned in RAM using mlock."
+        "CsprngEntropy: All salts and initialization nonces must be generated using cryptographically secure RNG."
+        "Argon2Params: Argon2id parameters must adhere to OWASP security guidelines (m=19456, t=2, p=1)."
+    }
+
+    Model DerivedKey
+    {
+        Type "Struct"
+        Members
+        {
+            "key_handle": "String (256-bit key reference identifier)"
+        }
+    }
+
+    Model EncryptedData
+    {
+        Type "Struct"
+        Members
+        {
+            "ciphertext": "String (Hex-encoded ciphertext)"
+            "nonce": "String (12-byte hex initialization vector)"
+            "tag": "String (16-byte hex authentication tag)"
+        }
+    }
+
+    Model DecryptedData
+    {
+        Type "Struct"
+        Members
+        {
+            "raw_bytes": "String (Decrypted plaintext in memory)"
+        }
+    }
+
+    @storage(CoreStorage::users)
+    @diagram(EncryptionFlow)
+    Contract deriveKey
+    {
+        Signature "deriveKey(password: String, salt_hex: String)" -> "EncryptionEngine::DerivedKey"
+
+        Requires "Argon2id cryptographic module is initialized."
+
+        Ensures "Derives 256-bit symmetric encryption key from master password using Argon2id."
+
+        Precondition
+        {
+            "password string length is at least 8 characters."
+            "salt_hex is valid 16-byte hex string."
+        }
+
+        Postcondition
+        {
+            "Derived key is locked in memory via mlock."
+        }
+
+        Process
+        {
+            1. "Parse salt from hexadecimal string."
+            2. "Configure Argon2id context with m=19456, t=2, p=1."
+            3. "Compute 256-bit derived key buffer."
+            4. "Call lockMemory on key address."
+            5. "Return DerivedKey containing secure key handle."
+        }
+
+        Errors
+        {
+            "KeyDerivationFailed"
+            "MemoryLockFailed"
+        }
+    }
+
+    @storage(CoreStorage::secure_variables)
+    @diagram(EncryptionFlow)
+    Contract encryptData
+    {
+        Signature "encryptData(raw_data: String, key: EncryptionEngine::DerivedKey)" -> "EncryptionEngine::EncryptedData"
+
+        Requires "CSPRNG entropy source is available."
+
+        Ensures "Encrypts plaintext using AES-256-GCM and generates 12-byte nonce and 16-byte authentication tag."
+
+        Precondition
+        {
+            "raw_data is non-empty."
+            "key handle references valid locked key."
+        }
+
+        Postcondition
+        {
+            "Returns EncryptedData struct containing ciphertext, nonce, and tag."
+        }
+
+        Process
+        {
+            1. "Generate random 12-byte nonce from CSPRNG."
+            2. "Retrieve key bytes from locked memory buffer."
+            3. "Initialize AES-256-GCM cipher."
+            4. "Encrypt raw_data and produce 16-byte authentication tag."
+            5. "Wipe transient plaintext memory."
+            6. "Return EncryptedData."
+        }
+
+        Errors
+        {
+            "EncryptionFailed"
+        }
+    }
+
+    @storage(CoreStorage::secure_variables)
+    @diagram(EncryptionFlow)
+    Contract decryptData
+    {
+        Signature "decryptData(encrypted: EncryptionEngine::EncryptedData, key: EncryptionEngine::DerivedKey)" -> "EncryptionEngine::DecryptedData"
+
+        Requires "Key is active in locked RAM."
+
+        Ensures "Authenticates tag and decrypts AES-256-GCM ciphertext into transient memory."
+
+        Precondition
+        {
+            "encrypted ciphertext, nonce, and tag are non-empty."
+        }
+
+        Postcondition
+        {
+            "Decrypted data exists only in locked memory buffer."
+        }
+
+        Process
+        {
+            1. "Retrieve key bytes from locked memory buffer."
+            2. "Initialize AES-256-GCM cipher with nonce and authentication tag."
+            3. "Decrypt ciphertext and verify tag authenticity."
+            4. "If authentication fails, return error InvalidAuthenticationTag."
+            5. "Place plaintext into DecryptedData."
+            6. "Return DecryptedData."
+        }
+
+        Errors
+        {
+            "InvalidAuthenticationTag"
+            "DecryptionFailed"
+        }
+    }
+
+    @diagram(EncryptionFlow)
+    Contract lockMemory
+    {
+        Signature "lockMemory(handle: String)" -> "Boolean"
+
+        Requires "OS supports mlock / VirtualLock."
+
+        Ensures "Pins memory page containing key handle to prevent swap-to-disk leaks."
+
+        Precondition
+        {
+            "handle points to allocated buffer in process memory."
+        }
+
+        Postcondition
+        {
+            "Memory block is excluded from OS swap paging."
+        }
+
+        Process
+        {
+            1. "Call libc::mlock on buffer memory page."
+            2. "Verify zero return code."
+            3. "Mark buffer as locked."
+            4. "Return true."
+        }
+
+        Errors
+        {
+            "MlockFailed"
+        }
+    }
+}

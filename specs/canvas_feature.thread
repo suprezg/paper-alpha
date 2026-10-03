@@ -1,0 +1,199 @@
+Feature ModularCanvas
+{
+    !Note [[
+        Governs the modular, 2D dual-axis scrollable canvas grid within the Slint native retained GUI.
+        Supports dynamic browser-style persistent workspace tabs created via the '+' button, where users can spawn
+        unlimited independent tabs, mount custom widget layouts, and have their entire multi-tab workspace state
+        persist automatically across sessions and re-logins.
+        Enforces workspace customization via the right-side Widget Selection Panel, drag-and-drop declarative widget
+        tile placement from Data Feed and Data Consumer plugins, Plotters chart rendering, dynamic grid reflow,
+        and tab lifecycle management.
+    ]]
+
+    !Diagram CanvasFlow
+    [[
+        ```mermaid
+        flowchart TD
+            PlusIcon([Click '+' New Tab]) --> NewTab[SlintCanvasCoordinator::createWorkspaceTab]
+            NewTab --> CanvasGrid[Render Independent 2D Slint Canvas Grid]
+            CanvasGrid --> ClickCust[Click 'Customize Workspace']
+            ClickCust --> Drawer[Open Right-Side Widget Selection Panel]
+            Drawer --> SelectCat{Select Widget Category}
+            SelectCat -->|Data Feed Plugins| DragFeed[Drag Data Feed Widget]
+            SelectCat -->|Data Consumer Plugins| DragCons[Drag Data Consumer Widget]
+            DragFeed --> Place[SlintCanvasCoordinator::mountDeclarativeWidget]
+            DragCons --> Place
+            Place --> Save[SlintCanvasCoordinator::updateCanvasLayout]
+            Save --> DB[(CoreStorage::workspace_layouts)]
+            ReLogin([User Re-Logins]) --> Restore[SlintCanvasCoordinator::loadUserTabs]
+            Restore --> DB
+        ```
+    ]]
+
+    Background
+    {
+        Given "an authenticated user is using the Paper-Alpha desktop application"
+        And "the Slint canvas layout coordinator is active"
+    }
+
+    Rule "Dynamic Browser-Style Persistent Workspace Tabs"
+    {
+        @component(SlintCanvasCoordinator::createWorkspaceTab)
+        @storage(CoreStorage::workspace_layouts)
+        Scenario CreateNewTabViaPlusIcon
+        {
+            Title "Creating a new workspace tab via browser-style plus icon"
+
+            When "the user clicks the '+' plus icon on the workspace tab bar"
+            Then "a new workspace tab is created with default title 'Workspace N'"
+            And "an empty 2D Slint canvas grid is initialized"
+            And "the new tab layout is persisted to CoreStorage::workspace_layouts"
+        }
+
+        @component(SlintCanvasCoordinator::switchActiveTab)
+        @diagram(CanvasFlow)
+        Scenario SwitchBetweenDynamicTabs
+        {
+            Title "Switching between dynamic tabs swaps canvas view and hibernates inactive streams"
+
+            Given "multiple workspace tabs exist"
+            When "the user clicks on another tab header"
+            Then "the active view switches to the selected tab canvas"
+            And "widgets on the previous tab hibernate and decrement topic references"
+            And "widgets on the selected tab resume real-time data feeds"
+        }
+
+        @component(SlintCanvasCoordinator::closeWorkspaceTab)
+        @storage(CoreStorage::workspace_layouts)
+        Scenario CloseDynamicTab
+        {
+            Title "Closing a dynamic tab removes canvas layout and unmounts widgets"
+
+            Given "a workspace tab is open"
+            When "the user clicks the close icon on the tab header"
+            Then "all mounted widgets on the tab are unmounted"
+            And "the tab layout is removed from CoreStorage::workspace_layouts"
+            And "the UI switches to the nearest adjacent workspace tab"
+        }
+
+        @component(SlintCanvasCoordinator::loadUserTabs)
+        @storage(CoreStorage::workspace_layouts)
+        Scenario RestoreDynamicTabsOnReLogin
+        {
+            Title "All workspace tabs, ordering, and widget layouts are restored identically upon re-login"
+
+            Given "a user configured custom tabs with specific widgets and layouts in a previous session"
+            When "the user logs into Paper-Alpha on a subsequent session"
+            Then "SlintCanvasCoordinator loads all saved tabs from CoreStorage::workspace_layouts"
+            And "the tabs are restored in their exact original order and titles"
+            And "all widget tiles on each tab are positioned exactly as previously configured"
+        }
+    }
+
+    Rule "Workspace Customization and Drag-and-Drop Tile Management"
+    {
+        @component(SlintCanvasCoordinator::mountDeclarativeWidget)
+        @diagram(CanvasFlow)
+        Scenario ToggleCustomizationPanel
+        {
+            Title "Opening and closing the right-side Widget Selection Panel"
+
+            Given "the user is on an active workspace tab"
+            When "the user clicks 'Customize Workspace'"
+            Then "the right-side Widget Selection Panel opens"
+            And "canvas tiles enter an editable, draggable state"
+            When "the user clicks 'Customize Workspace' again"
+            Then "the panel closes and tiles lock into their fixed positions"
+        }
+
+        @component(SlintCanvasCoordinator::mountDeclarativeWidget)
+        @component(SlintCanvasCoordinator::updateCanvasLayout)
+        @storage(CoreStorage::workspace_layouts)
+        Scenario DragWidgetFromPanelToActiveTab
+        {
+            Title "Dragging a widget from the selection panel mounts it onto the active canvas grid"
+
+            Given "the user is customizing the active workspace tab"
+            When "the user drags a widget from the right-side panel and drops it at grid coordinate (X: 100, Y: 200)"
+            Then "the widget is instantiated as a native Slint tile at (X: 100, Y: 200)"
+            And "the updated layout is saved to CoreStorage::workspace_layouts"
+        }
+
+        @component(SlintCanvasCoordinator::updateCanvasLayout)
+        @storage(CoreStorage::workspace_layouts)
+        Scenario RemoveWidgetBackToPanel
+        {
+            Title "Removing a widget from canvas returns it to selection panel"
+
+            Given "a widget tile is placed on the active canvas tab"
+            When "the user clicks the close icon on the widget tile"
+            Then "the tile is unmounted from the Slint canvas model"
+            And "the widget becomes available again in the selection panel"
+            And "the updated tab layout is persisted to CoreStorage::workspace_layouts"
+        }
+
+        @component(SlintCanvasCoordinator::updateCanvasLayout)
+        @storage(CoreStorage::workspace_layouts)
+        Scenario ResizeAndRearrangeWidgets
+        {
+            Title "Resizing and rearranging widget tiles triggers dynamic grid reflow"
+
+            Given "a widget is mounted on the active workspace tab"
+            When "the user resizes the widget to span 4 columns and 3 rows"
+            And "drags it to position (Col: 2, Row: 1)"
+            Then "the widget re-renders with new dimensions"
+            And "adjacent tiles reflow dynamically without overlapping"
+            And "the updated grid layout is saved to CoreStorage::workspace_layouts"
+        }
+    }
+
+    Rule "Categorized Widget Selection from Data Feed and Data Consumer Plugins"
+    {
+        @component(SlintCanvasCoordinator::mountDeclarativeWidget)
+        @diagram(CanvasFlow)
+        Scenario DisplayCategorizedWidgetsInSelectionPanel
+        {
+            Title "Right-side selection panel organizes available widgets by plugin category"
+
+            Given "the user opens the right-side Widget Selection Panel"
+            Then "available widgets are categorized into 'Data Feed Plugins' and 'Data Consumer Plugins'"
+            And "users can freely drag any available widget from either category onto any workspace tab"
+        }
+
+        @component(SlintCanvasCoordinator::updateCanvasLayout)
+        @storage(CoreStorage::workspace_layouts)
+        Scenario PersistModifiedTabLayouts
+        {
+            Title "Layout changes across tabs are independently persisted to database"
+
+            Given "the user modifies widget positions on one tab"
+            When "the user switches to a different tab and modifies another layout"
+            Then "both distinct tab layouts are preserved independently in CoreStorage::workspace_layouts"
+        }
+    }
+
+    Rule "Native Plotters Chart Visualizations on Canvas"
+    {
+        @component(PlottersChartRenderer::renderFinancialCandles)
+        Scenario RenderCandlestickChartTile
+        {
+            Title "Rendering financial OHLCV candlestick chart tile on canvas"
+
+            Given "a CandlestickChart widget is mounted on an active workspace tab"
+            When "real-time tick packets arrive on topic 'raw:ticks:NVDA'"
+            Then "PlottersChartRenderer draws OHLCV candles and volume bars into the pixel buffer"
+            And "the Slint canvas element displays the updated chart frame"
+        }
+
+        @component(PlottersChartRenderer::renderThreeDSurface)
+        Scenario RenderThreeDVolatilitySurfaceTile
+        {
+            Title "Rendering 3D volatility surface projection tile on canvas"
+
+            Given "a ThreeDPlot widget is mounted on an active workspace tab"
+            When "volatility matrix data arrives from a quantitative plugin"
+            Then "PlottersChartRenderer projects the 3D surface manifold into the buffer"
+            And "the Slint canvas displays the 3D surface plot"
+        }
+    }
+}

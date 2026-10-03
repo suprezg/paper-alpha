@@ -1,0 +1,165 @@
+Component DatabaseService
+{
+    !Note [[
+        Central encrypted state persistence engine of the Core, utilizing SQLCipher (SQLite with AES-256-GCM encryption)
+        and SQLx connection pooling. Operates in Write-Ahead Logging (WAL) mode to permit concurrent non-blocking reads,
+        while all writes are buffered and executed sequentially through the WAL write queue.
+    ]]
+
+    !Diagram DatabaseFlow
+    [[
+        ```mermaid
+        flowchart TD
+            Init([initialize]) --> SetKey[Set PRAGMA key]
+            SetKey --> SetWal[Set PRAGMA journal_mode = WAL]
+            SetWal --> RunMigrate[Run SQL Migrations]
+            RunMigrate --> Ready[Database Pool Ready]
+            Query([executeQuery]) --> RunSql[Execute SQL on Pool]
+            Flush([flushWrites]) --> Drain[Drain WAL Queue]
+        ```
+    ]]
+
+    Invariants
+    {
+        "EncryptionAtRest: The database file on disk must remain fully encrypted at rest using SQLCipher AES-256."
+        "WalModeOnly: The database must operate in Write-Ahead Logging (WAL) mode at all times."
+        "NonBlockingReads: Read operations must execute concurrently without waiting on write transactions."
+    }
+
+    Model EncryptionKey
+    {
+        Type "Struct"
+        Members
+        {
+            "key_bytes": "String (256-bit hexadecimal string)"
+        }
+    }
+
+    Model QueryParams
+    {
+        Type "Struct"
+        Members
+        {
+            "bindings": "String"
+        }
+    }
+
+    Model QueryResult
+    {
+        Type "Struct"
+        Members
+        {
+            "rows_count": "Int"
+            "data_json": "String"
+        }
+    }
+
+    @storage(CoreStorage::users)
+    @diagram(DatabaseFlow)
+    Contract initialize
+    {
+        Signature "initialize(key: DatabaseService::EncryptionKey)" -> "Boolean"
+
+        Requires "Disk storage directory ~/.config/paper-alpha/ is accessible."
+
+        Ensures "Opens SQLCipher connection pool with WAL mode and applies migrations."
+
+        Precondition
+        {
+            "key must contain valid 256-bit key structure."
+        }
+
+        Postcondition
+        {
+            "Database pool is ready for read and write queries."
+        }
+
+        Process
+        {
+            1. "Open connection pool to paper_alpha.db file."
+            2. "Execute PRAGMA key with provided key_bytes."
+            3. "Execute PRAGMA journal_mode = WAL."
+            4. "Execute SQL migration scripts to create tables and indexes."
+            5. "Return true."
+        }
+
+        Errors
+        {
+            "InvalidKey"
+            "DiskAccessDenied"
+            "MigrationFailed"
+        }
+    }
+
+    @storage(CoreStorage::users)
+    @storage(CoreStorage::secure_variables)
+    @storage(CoreStorage::static_query_cache)
+    @protocol(SlowSpeedBusProtocol::SlowSpeedEventPipe)
+    @diagram(DatabaseFlow)
+    Contract executeQuery
+    {
+        Signature "executeQuery(sql: String, params: DatabaseService::QueryParams)" -> "DatabaseService::QueryResult"
+
+        Requires "Database pool is initialized and active."
+
+        Ensures "Executes SQL query against SQLCipher pool and returns formatted QueryResult."
+
+        Precondition
+        {
+            "SQL string is non-empty and syntactically valid."
+        }
+
+        Postcondition
+        {
+            "Result rows are packaged into JSON representation."
+        }
+
+        Process
+        {
+            1. "Acquire reader connection from SQLx pool."
+            2. "Bind parameters to query statement."
+            3. "Execute query and fetch rows."
+            4. "Package rows into QueryResult."
+            5. "Return QueryResult."
+        }
+
+        Errors
+        {
+            "QuerySyntaxError"
+            "PoolExhausted"
+        }
+    }
+
+    @diagram(DatabaseFlow)
+    Contract flushWrites
+    {
+        Signature "flushWrites()" -> "Boolean"
+
+        Requires "DatabaseWalQueue is active."
+
+        Ensures "Flushes all pending WAL write commands to disk and completes active transactions."
+
+        Precondition
+        {
+            "Shutdown or checkpoint sequence initiated."
+        }
+
+        Postcondition
+        {
+            "Zero pending writes remain in WAL queue."
+        }
+
+        Process
+        {
+            1. "Signal DatabaseWalQueue to drain pending buffer."
+            2. "Execute PRAGMA wal_checkpoint(TRUNCATE)."
+            3. "Confirm all transactions committed to paper_alpha.db."
+            4. "Return true."
+        }
+
+        Errors
+        {
+            "CheckpointFailed"
+        }
+    }
+}

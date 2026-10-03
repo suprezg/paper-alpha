@@ -1,106 +1,259 @@
-syntax = behavior
+Feature PluginPackagingAndValidation
+{
+    !Note [[
+        Governs plugin distribution specifications, standard package layouts, manifest schema validation,
+        Data Feed plugin emissions declarations ('streaming' vs 'non_streaming'), Data Consumer plugin
+        consumptions declarations, multi-language backend target support (native binaries, sandboxed WASM,
+        interpreted Python scripts), Declarative Widget Schema parsing for native Slint views, nested container
+        structures (Cards, Tiles, Grids, Groups), and error enforcement for missing files or malformed JSON manifests.
+    ]]
 
-Feature: "Plugin Package Specification and Structural Validation"
-  Note: [[As a plugin developer
-  I want to package frontend assets, backend execution binaries, and a manifest file into a standard plugin structure
-  So that the Paper-Alpha application can validate, load, and run my plugin regardless of the framework or programming language used.]]
+    !Diagram PluginValidationFlow
+    [[
+        ```mermaid
+        flowchart TD
+            Package([Plugin Package Folder]) --> Scan[PluginScanner::scanDirectory]
+            Scan --> Parse[PluginScanner::validateManifest]
+            Parse --> SchemaEngine[DeclarativeSchemaEngine::parseWidgetSchema]
+            SchemaEngine --> CheckManifest{manifest.json valid?}
+            CheckManifest -- No --> Reject[Interface Validation Failed]
+            CheckManifest -- Yes --> CheckBackend{Backend Target Exists?}
+            CheckBackend -- No --> Reject
+            CheckBackend -- Yes --> Register[Register Plugin in DashMap & CoreStorage]
+        ```
+    ]]
 
-  Rule: "Compliant plugins must contain a manifest file, bundled frontend assets, and a backend execution target"
+    Background
+    {
+        Given "a developer creates a custom plugin package for Paper-Alpha"
+        And "the Core directory validator is active"
+    }
 
-    Scenario: "Developing a valid plugin with compiled assets"
-      Given "a plugin developer is preparing a custom plugin package for Paper-Alpha"
-      And "the developer creates a manifest file named \"manifest.json\""
-      And "bundles the frontend UI into \"widget.js\" and \"styles.css\" using their chosen frontend framework"
-      And "provides a backend execution asset as a compiled binary, WASM module, or interpreted script"
-      When "the plugin package is placed in the local plugins directory"
-      Then "the application should successfully pass the structural validation"
-      And "the plugin should be registered as compliant"
+    Rule "Compliant Plugin Structure and Declarative Schema"
+    {
+        @component(PluginScanner::validateManifest)
+        @component(DeclarativeSchemaEngine::parseWidgetSchema)
+        @diagram(PluginValidationFlow)
+        Scenario PackageCompliantPluginWithDeclarativeSchema
+        {
+            Title "Creating a valid plugin package with manifest and declarative widgets"
 
-    Scenario: "Supporting diverse backend implementation formats - Case 1"
-      Given "a plugin developer is preparing a custom plugin package for Paper-Alpha"
-      And "a plugin directory contains a valid \"manifest.json\", \"widget.js\", and \"styles.css\""
-      And "the backend target is provided as a \"Compiled Binary\" file named \"plugin_backend\""
-      When "the application scans the plugin directory"
-      Then "the backend target should be recognized as a valid execution artifact"
-      And "the structural validation for the backend asset should pass"
+            Given "a plugin folder contains 'manifest.json' declaring valid 'widgets' schema"
+            And "provides a declared backend target"
+            When "the package is scanned by the Core engine"
+            Then "structural validation passes successfully"
+            And "the plugin is marked as compliant"
+        }
 
-    Scenario: "Supporting diverse backend implementation formats - Case 2"
-      Given "a plugin developer is preparing a custom plugin package for Paper-Alpha"
-      And "a plugin directory contains a valid \"manifest.json\", \"widget.js\", and \"styles.css\""
-      And "the backend target is provided as a \"WASM Module\" file named \"plugin.wasm\""
-      When "the application scans the plugin directory"
-      Then "the backend target should be recognized as a valid execution artifact"
-      And "the structural validation for the backend asset should pass"
+        @component(DeclarativeSchemaEngine::parseWidgetSchema)
+        Scenario SupportNestedWidgetContainers
+        {
+            Title "Supporting nested container schema with Cards, Charts, and Action Groups"
 
-    Scenario: "Supporting diverse backend implementation formats - Case 3"
-      Given "a plugin developer is preparing a custom plugin package for Paper-Alpha"
-      And "a plugin directory contains a valid \"manifest.json\", \"widget.js\", and \"styles.css\""
-      And "the backend target is provided as a \"Interpreted Script\" file named \"main.py\""
-      When "the application scans the plugin directory"
-      Then "the backend target should be recognized as a valid execution artifact"
-      And "the structural validation for the backend asset should pass"
+            Given "a plugin manifest declares a 'Card' root element"
+            And "the Card contains a nested 'CandlestickChart' and a horizontal 'Group' of 'Label' and 'Button'"
+            When "DeclarativeSchemaEngine parses the manifest"
+            Then "the hierarchical component tree is constructed successfully"
+            And "all child components are validated"
+        }
+    }
 
-    Scenario: "Supporting any frontend framework compiled to widget.js - Case 1"
-      Given "a plugin developer is preparing a custom plugin package for Paper-Alpha"
-      And "the developer builds the frontend UI using \"React\""
-      And "compiles the output into a single \"widget.js\" and \"styles.css\" file"
-      When "the application loads the frontend assets"
-      Then "the UI component should render properly without framework-specific dependencies"
+    Rule "Data Feed and Data Consumer Manifest Declarations"
+    {
+        @component(PluginScanner::validateManifest)
+        Scenario ValidateDataFeedPluginEmissions
+        {
+            Title "Data Feed plugin manifest declares emitted variables and streaming modes"
 
-    Scenario: "Supporting any frontend framework compiled to widget.js - Case 2"
-      Given "a plugin developer is preparing a custom plugin package for Paper-Alpha"
-      And "the developer builds the frontend UI using \"Vue\""
-      And "compiles the output into a single \"widget.js\" and \"styles.css\" file"
-      When "the application loads the frontend assets"
-      Then "the UI component should render properly without framework-specific dependencies"
+            Given "a plugin manifest specifies category 'data_feed'"
+            And "contains an 'emits' array declaring variables with 'streaming' and 'non_streaming' transmission types"
+            When "PluginScanner validates the manifest"
+            Then "the emissions declaration is verified successfully"
+            And "the plugin is marked as compliant Data Feed"
+        }
 
-    Scenario: "Supporting any frontend framework compiled to widget.js - Case 3"
-      Given "a plugin developer is preparing a custom plugin package for Paper-Alpha"
-      And "the developer builds the frontend UI using \"Svelte\""
-      And "compiles the output into a single \"widget.js\" and \"styles.css\" file"
-      When "the application loads the frontend assets"
-      Then "the UI component should render properly without framework-specific dependencies"
+        @component(PluginScanner::validateManifest)
+        Scenario ValidateDataConsumerPluginConsumptions
+        {
+            Title "Data Consumer plugin manifest declares consumed variables and data streams"
 
-    Scenario: "Supporting any frontend framework compiled to widget.js - Case 4"
-      Given "a plugin developer is preparing a custom plugin package for Paper-Alpha"
-      And "the developer builds the frontend UI using \"Vanilla JS\""
-      And "compiles the output into a single \"widget.js\" and \"styles.css\" file"
-      When "the application loads the frontend assets"
-      Then "the UI component should render properly without framework-specific dependencies"
+            Given "a plugin manifest specifies category 'data_consumer'"
+            And "contains a 'consumes' array declaring required input streams and variables"
+            When "PluginScanner validates the manifest"
+            Then "the consumptions declaration is verified successfully"
+            And "the plugin is marked as compliant Data Consumer"
+        }
 
-  Rule: "Missing required bundle artifacts or malformed manifests cause structural validation failure"
+        @component(PluginScanner::validateManifest)
+        Scenario RejectDataFeedMissingEmits
+        {
+            Title "Data Feed plugin rejected when emits array is missing or invalid"
 
-    Scenario: "Structural validation failure due to missing required files - Case 1"
-      Given "a plugin developer is preparing a custom plugin package for Paper-Alpha"
-      And "a plugin directory contains \"widget.js, styles.css, plugin_backend\""
-      But "is missing the required file \"manifest.json\""
-      When "the application scans the plugin directory"
-      Then "the structural validation for the plugin should fail"
-      And "the plugin status should be marked as \"Interface Validation Failed\""
-      And "the application should block the plugin from executing"
+            Given "a plugin specifies category 'data_feed' but lacks an 'emits' declaration"
+            When "PluginScanner evaluates the manifest"
+            Then "validation fails with missing emissions specification error"
+            And "the plugin is marked as 'Interface Validation Failed'"
+        }
 
-    Scenario: "Structural validation failure due to missing required files - Case 2"
-      Given "a plugin developer is preparing a custom plugin package for Paper-Alpha"
-      And "a plugin directory contains \"manifest.json, styles.css, plugin_backend\""
-      But "is missing the required file \"widget.js\""
-      When "the application scans the plugin directory"
-      Then "the structural validation for the plugin should fail"
-      And "the plugin status should be marked as \"Interface Validation Failed\""
-      And "the application should block the plugin from executing"
+        @component(PluginScanner::validateManifest)
+        Scenario RejectDataConsumerMissingConsumes
+        {
+            Title "Data Consumer plugin rejected when consumes array is missing or invalid"
 
-    Scenario: "Structural validation failure due to missing required files - Case 3"
-      Given "a plugin developer is preparing a custom plugin package for Paper-Alpha"
-      And "a plugin directory contains \"manifest.json, widget.js, styles.css\""
-      But "is missing the required file \"backend target\""
-      When "the application scans the plugin directory"
-      Then "the structural validation for the plugin should fail"
-      And "the plugin status should be marked as \"Interface Validation Failed\""
-      And "the application should block the plugin from executing"
+            Given "a plugin specifies category 'data_consumer' but lacks a 'consumes' declaration"
+            When "PluginScanner evaluates the manifest"
+            Then "validation fails with missing consumptions specification error"
+            And "the plugin is marked as 'Interface Validation Failed'"
+        }
+    }
 
-    Scenario: "Validation failure when manifest file contains invalid JSON"
-      Given "a plugin developer is preparing a custom plugin package for Paper-Alpha"
-      And "a plugin directory contains \"widget.js\", \"styles.css\", and a valid backend executable"
-      And "the \"manifest.json\" file contains malformed or unparseable JSON syntax"
-      When "the application scans the plugin directory"
-      Then "structural validation should fail with a manifest parsing error"
-      And "the plugin toggle should remain locked in the disabled state"
+    Rule "Multi-Format Backend Execution Targets"
+    {
+        @component(PluginScanner::validateManifest)
+        @component(ProcessSupervisor::spawnSubprocess)
+        Scenario SupportCompiledBinaryBackend
+        {
+            Title "Supporting native compiled binary backend target"
+
+            Given "a plugin specifies backend type 'binary' with executable 'bin/plugin-name-linux-x86_64'"
+            When "the application validates and launches the plugin"
+            Then "the binary backend is recognized as valid execution target"
+            And "the subprocess is spawned over local gRPC sockets"
+        }
+
+        @component(PluginScanner::validateManifest)
+        @component(WasmRuntime::loadModule)
+        Scenario SupportWasmModuleBackend
+        {
+            Title "Supporting sandboxed WASM module backend target"
+
+            Given "a plugin specifies backend type 'wasm' with module 'bin/plugin-name.wasm'"
+            When "the application validates and loads the plugin"
+            Then "the WASM binary is compiled into an in-memory guest instance"
+            And "WASM C-FFI hooks are registered"
+        }
+
+        @component(PluginScanner::validateManifest)
+        @component(ProcessSupervisor::spawnSubprocess)
+        Scenario SupportInterpretedScriptBackend
+        {
+            Title "Supporting interpreted Python script backend target"
+
+            Given "a plugin specifies backend type 'interpreted' with entrypoint 'src/main.py'"
+            When "the application validates and spawns the plugin"
+            Then "the Python interpreter is spawned pointing to main.py"
+            And "the subprocess connects to the Core gRPC server"
+        }
+    }
+
+    Rule "Structural Validation Failures and Missing Artifacts"
+    {
+        @component(PluginScanner::validateManifest)
+        Scenario RejectMissingManifest
+        {
+            Title "Package rejected when manifest.json is missing"
+
+            Given "a plugin directory contains backend execution files"
+            But "is missing the required 'manifest.json' file"
+            When "the scanner inspects the directory"
+            Then "validation fails"
+            And "the plugin is marked as 'Interface Validation Failed'"
+        }
+
+        @component(PluginScanner::validateManifest)
+        Scenario RejectMissingBackendTarget
+        {
+            Title "Package rejected when backend executable or script is missing"
+
+            Given "a plugin directory contains 'manifest.json'"
+            But "the declared backend binary file is not found on disk"
+            When "the scanner inspects the directory"
+            Then "validation fails"
+            And "the application blocks the plugin from executing"
+        }
+
+        @component(PluginScanner::validateManifest)
+        Scenario RejectMalformedJsonManifest
+        {
+            Title "Package rejected when manifest.json contains malformed JSON"
+
+            Given "a plugin has a corrupted or unparseable 'manifest.json'"
+            When "the scanner attempts to deserialize the manifest"
+            Then "validation fails with a JSON parsing error"
+            And "the plugin is disabled"
+        }
+
+        @component(DeclarativeSchemaEngine::parseWidgetSchema)
+        Scenario RejectUnknownSchemaComponent
+        {
+            Title "Package rejected when manifest contains unknown widget component type"
+
+            Given "a plugin manifest specifies a widget with invalid type 'UnsupportedVideoPlayer'"
+            When "DeclarativeSchemaEngine evaluates the schema"
+            Then "validation fails with an unknown element type error"
+            And "the plugin is locked in the disabled state"
+        }
+    }
+
+    Rule "Runtime Policy Enforcement and Structural Adherence"
+    {
+        @component(PluginPolicyEnforcer::enforceDataFeedEmission)
+        @component(RouterService::dispatchStream)
+        @protocol(PluginEnforcementProtocol::PolicyValidationPipe)
+        Scenario BlockStreamingFeedFromSlowBus
+        {
+            Title "Data Feed plugin with streaming mode is strictly prohibited from accessing Slow Speed Bus"
+
+            Given "a Data Feed plugin 'LiveTickFeed' specifies variable 'NVDA:ticks' with type 'streaming'"
+            When "'LiveTickFeed' attempts to dispatch packets to the Slow Speed Event Bus"
+            Then "PluginPolicyEnforcer rejects the dispatch"
+            And "an error 'Streaming data feed cannot access slow bus' is returned"
+        }
+
+        @component(PluginPolicyEnforcer::enforceDataFeedEmission)
+        @protocol(PluginEnforcementProtocol::PolicyViolationPipe)
+        Scenario BlockUndeclaredVariableMutation
+        {
+            Title "Data Feed plugin cannot alter any variable not declared in its manifest emits"
+
+            Given "a Data Feed plugin 'AlphaFeed' is executing"
+            When "'AlphaFeed' attempts to emit variable 'UNAUTHORIZED_VAR' not listed in its manifest 'emits'"
+            Then "PluginPolicyEnforcer intercepts and blocks the mutation"
+            And "a policy violation event is logged"
+        }
+
+        @component(PluginPolicyEnforcer::enforceDataConsumerAccess)
+        @component(RouterService::routeCommand)
+        @protocol(PluginEnforcementProtocol::PolicyViolationPipe)
+        Scenario BlockDataConsumerSendingData
+        {
+            Title "Data Consumer plugins can only consume and are strictly forbidden from sending data"
+
+            Given "a Data Consumer plugin 'MovingAverageCalculator' is executing"
+            When "'MovingAverageCalculator' attempts to transmit outbound stream data"
+            Then "PluginPolicyEnforcer blocks the transmission"
+            And "an error 'Data consumer plugins are forbidden from sending data' is returned"
+        }
+
+        @component(PluginPolicyEnforcer::enforceDataConsumerAccess)
+        Scenario BlockDirectInterPluginCalls
+        {
+            Title "Data Consumer plugins cannot directly call other plugins"
+
+            Given "a Data Consumer plugin 'PortfolioAnalytics' is executing"
+            When "'PortfolioAnalytics' attempts to directly invoke 'Binance Order Execution' plugin"
+            Then "PluginPolicyEnforcer denies the direct call"
+            And "inter-plugin isolation is strictly maintained"
+        }
+
+        @component(PluginPolicyEnforcer::enforceDataConsumerAccess)
+        Scenario BlockUndeclaredTopicConsumption
+        {
+            Title "Data Consumer plugins cannot consume anything not specified in manifest consumes"
+
+            Given "a Data Consumer plugin specifies consumes array containing only 'raw:ticks'"
+            When "the plugin requests subscription to undeclared topic 'confidential:orders'"
+            Then "PluginPolicyEnforcer rejects the subscription request"
+        }
+    }
+}

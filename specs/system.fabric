@@ -1,0 +1,142 @@
+system "Paper-Alpha Microkernel Macro Architecture"
+
+# ============================================================================
+# 1. Canvas Visual Cluster Groups
+# ============================================================================
+
+group "User Experience & Workspace Workflows"
+{
+    Feature.UserAuthentication
+    Feature.WorkspaceConfiguration
+    Feature.ModularCanvas
+    Feature.PluginPackagingAndValidation
+    Component.AuthenticationService
+    Protocol.AuthenticationProtocol::UserAuthCommandPipe
+    Protocol.AuthenticationProtocol::SessionTokenEventPipe
+}
+
+group "Core Security & Cryptographic Vault"
+{
+    Component.EncryptionEngine
+    Component.KeyResolverSdk
+    Storage.CoreStorage::users
+    Storage.CoreStorage::backup_codes
+    Storage.CoreStorage::recovery_phrases
+    Storage.CoreStorage::secure_variables
+    Storage.CoreStorage::variable_acls
+}
+
+group "Core Persistence & WAL Engine"
+{
+    Component.DatabaseService
+    Component.DatabaseWalQueue
+    Storage.CoreStorage::plugin_configs
+    Storage.CoreStorage::workspace_layouts
+    Storage.CoreStorage::theme_settings
+    Storage.CoreStorage::static_query_cache
+}
+
+group "Central Message Routing & Context Coordination"
+{
+    Component.RouterService
+    Component.RegistryService
+    Component.TopicRefCounter
+    Component.CycleGuard
+    Component.PluginPolicyEnforcer
+    Protocol.SlintUiProtocol::SlintCommandDispatchPipe
+    Protocol.SlintUiProtocol::SlintContextBindingPipe
+    Protocol.PluginEnforcementProtocol::PolicyValidationPipe
+    Protocol.PluginEnforcementProtocol::PolicyViolationPipe
+}
+
+group "High Speed & Low Speed Bus Channels"
+{
+    Component.StreamAligner
+    Protocol.HighSpeedBusProtocol::HighSpeedBroadcastPipe
+    Protocol.SlowSpeedBusProtocol::SlowSpeedEventPipe
+}
+
+group "Plugin Lifecycle & Process Sandboxing"
+{
+    Component.PluginScanner
+    Component.ProcessSupervisor
+    Component.WasmRuntime
+    Component.GrpcSocketManager
+    Component.TeardownEngine
+    Protocol.PluginIpcProtocol::GrpcChannelPipe
+    Protocol.PluginIpcProtocol::TeardownSignalPipe
+}
+
+group "Slint Native GUI & Declarative Charting"
+{
+    Component.DeclarativeSchemaEngine
+    Component.SlintCanvasCoordinator
+    Component.PlottersChartRenderer
+}
+
+# ============================================================================
+# 2. Macro Topology Connections & Dependency Edges
+# ============================================================================
+
+Feature.UserAuthentication -> Component.AuthenticationService::authenticateUser : "Authenticates user login with Argon2id hash"
+Feature.UserAuthentication -> Component.AuthenticationService::registerUser : "Registers profile and generates backup recovery keys"
+Feature.WorkspaceConfiguration -> Component.RegistryService::registerPlugin : "Toggles active plugin state in memory registry"
+Feature.WorkspaceConfiguration -> Component.PluginScanner::scanDirectory : "Triggers dynamic rescan of local plugin directories"
+Feature.ModularCanvas -> Component.SlintCanvasCoordinator::createWorkspaceTab : "Creates dynamic persistent workspace tabs via '+' button"
+Feature.ModularCanvas -> Component.SlintCanvasCoordinator::loadUserTabs : "Restores all tabs and widget layouts on re-login"
+Feature.ModularCanvas -> Component.SlintCanvasCoordinator::mountDeclarativeWidget : "Mounts declarative widgets into Slint VecModel"
+Feature.ModularCanvas -> Component.SlintCanvasCoordinator::updateCanvasLayout : "Persists canvas grid layout changes to storage"
+Feature.ModularCanvas -> Component.PlottersChartRenderer::renderFinancialCandles : "Draws OHLCV candlestick chart into pixel buffer"
+Feature.PluginPackagingAndValidation -> Component.PluginScanner::validateManifest : "Validates manifest schema and backend targets"
+Feature.PluginPackagingAndValidation -> Component.DeclarativeSchemaEngine::parseWidgetSchema : "Validates nested declarative UI components"
+
+Component.AuthenticationService::authenticateUser -> Component.EncryptionEngine::deriveKey : "Derives master encryption key from password via Argon2id"
+Component.AuthenticationService::authenticateUser -> Component.DatabaseService::initialize : "Initializes SQLCipher connection pool with derived key"
+Component.AuthenticationService::authenticateUser -> Storage.CoreStorage::users : "Validates credentials against user records"
+Component.AuthenticationService::authenticateWithBackupCode -> Storage.CoreStorage::backup_codes : "Validates and consumes single-use backup codes"
+Component.AuthenticationService::recoverWithPhrase -> Storage.CoreStorage::recovery_phrases : "Validates and consumes recovery phrases"
+
+Component.PluginScanner::validateManifest -> Component.DeclarativeSchemaEngine::parseWidgetSchema : "Delegates schema tree validation"
+Component.DeclarativeSchemaEngine::instantiateSlintComponents -> Component.SlintCanvasCoordinator::mountDeclarativeWidget : "Mounts instantiated Slint views"
+Component.SlintCanvasCoordinator::mountDeclarativeWidget -> Protocol.SlintUiProtocol::SlintCommandDispatchPipe : "Dispatches button action RPCs"
+Component.SlintCanvasCoordinator::createWorkspaceTab -> Storage.CoreStorage::workspace_layouts : "Persists newly created workspace tab metadata"
+Component.SlintCanvasCoordinator::loadUserTabs -> Storage.CoreStorage::workspace_layouts : "Restores workspace tabs on user re-login"
+Component.SlintCanvasCoordinator::updateCanvasLayout -> Storage.CoreStorage::workspace_layouts : "Saves updated grid positions and tile layouts"
+
+Component.RouterService::routeCommand -> Protocol.SlintUiProtocol::SlintCommandDispatchPipe : "Receives user action commands"
+Component.RouterService::routeCommand -> Component.PluginPolicyEnforcer::enforceDataConsumerAccess : "Ensures consumers only read declared topics and never send data"
+Component.RouterService::routeContextChange -> Protocol.SlintUiProtocol::SlintContextBindingPipe : "Updates Slint model context properties"
+Component.RouterService::dispatchStream -> Protocol.HighSpeedBusProtocol::HighSpeedBroadcastPipe : "Dispatches real-time ticks to Tokio bus"
+Component.RouterService::dispatchStream -> Protocol.SlowSpeedBusProtocol::SlowSpeedEventPipe : "Dispatches static queries to MPSC bus"
+Component.RouterService::dispatchStream -> Component.PluginPolicyEnforcer::enforceDataFeedEmission : "Validates data feed stream compliance against manifest"
+
+Component.PluginPolicyEnforcer::enforceDataFeedEmission -> Protocol.PluginEnforcementProtocol::PolicyValidationPipe : "Transmits verification requests"
+Component.PluginPolicyEnforcer::enforceDataFeedEmission -> Protocol.PluginEnforcementProtocol::PolicyViolationPipe : "Emits violation signals on illegal access attempts"
+
+Component.RegistryService::setContext -> Protocol.SlintUiProtocol::SlintContextBindingPipe : "Triggers context change property updates"
+Component.RegistryService::registerPlugin -> Storage.CoreStorage::plugin_configs : "Persists plugin active toggle state"
+
+Component.DatabaseService::executeQuery -> Storage.CoreStorage::users : "Queries user credentials and profiles"
+Component.DatabaseService::executeQuery -> Storage.CoreStorage::static_query_cache : "Persists and fetches static query cache"
+Component.DatabaseWalQueue::enqueueWrite -> Storage.CoreStorage::users : "Queues asynchronous user profile writes in WAL mode"
+Component.DatabaseWalQueue::enqueueWrite -> Storage.CoreStorage::secure_variables : "Queues encrypted credential inserts"
+
+Component.EncryptionEngine::encryptData -> Storage.CoreStorage::secure_variables : "Encrypts API credentials with AES-256-GCM"
+Component.KeyResolverSdk::resolveRefVariable -> Storage.CoreStorage::variable_acls : "Validates plugin ACL permissions before decryption"
+
+Component.PluginScanner::scanDirectory -> Component.PluginScanner::validateManifest : "Inspects discovered plugin packages"
+Component.PluginScanner::registerDiscoveredPlugins -> Component.RegistryService::registerPlugin : "Registers valid plugins into Core"
+Component.PluginScanner::registerDiscoveredPlugins -> Component.PluginPolicyEnforcer::registerPluginPolicy : "Registers plugin capability policy into enforcer cache"
+
+Component.ProcessSupervisor::spawnSubprocess -> Protocol.PluginIpcProtocol::GrpcChannelPipe : "Launches native sidecar over local socket"
+Component.ProcessSupervisor::spawnSubprocess -> Component.GrpcSocketManager::bindSocket : "Binds Unix Domain Socket listener"
+Component.ProcessSupervisor::allocateGuestMemory -> Component.WasmRuntime::loadModule : "Manages in-memory WASM guest allocation"
+
+Component.TeardownEngine::triggerShutdown -> Protocol.PluginIpcProtocol::TeardownSignalPipe : "Broadcasts Shutdown RPC to plugins"
+Component.TeardownEngine::triggerShutdown -> Component.DatabaseService::flushWrites : "Flushes all pending WAL database writes"
+
+Component.TopicRefCounter::incrementSubscription -> Component.RouterService::routeContextChange : "Resumes stream when subscription count hits 1"
+Component.TopicRefCounter::decrementSubscription -> Component.RouterService::routeContextChange : "Pauses stream when subscription count drops to 0"
+
+Component.CycleGuard::verifyEnvelopeCycle -> Component.RouterService::dispatchStream : "Validates hop_trace to drop circular loops"
+Component.StreamAligner::bufferStreamEvent -> Component.PlottersChartRenderer::renderFinancialCandles : "Feeds aligned data to Plotters"

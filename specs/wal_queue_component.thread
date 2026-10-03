@@ -1,0 +1,115 @@
+Component DatabaseWalQueue
+{
+    !Note [[
+        Non-blocking database operations manager buffering SQLCipher write queries in a thread-safe
+        multi-producer, single-consumer (MPSC) channel. A dedicated background worker thread pool processes
+        writes sequentially in Write-Ahead Logging (WAL) mode, preventing write locks on the Core main execution loop.
+    ]]
+
+    !Diagram WalQueueFlow
+    [[
+        ```mermaid
+        flowchart TD
+            Caller([Write Request]) --> Enqueue[DatabaseWalQueue::enqueueWrite]
+            Enqueue --> MpscBuffer[(MPSC WAL Channel Buffer)]
+            MpscBuffer --> Worker[DatabaseWalQueue::processQueueLoop]
+            Worker --> Tx[Begin SQL Transaction]
+            Tx --> Exec[Execute SQL Write Query]
+            Exec --> Commit[Commit Transaction]
+        ```
+    ]]
+
+    Invariants
+    {
+        "StrictOrdering: Write queries must be executed strictly in the order they were enqueued."
+        "NonBlockingMainThread: The main thread must never block on disk I/O during tick ingestion or UI interactions."
+        "QueueResilience: The MPSC queue buffer must support at least 10,000 pending write commands without dropping packets."
+    }
+
+    Model DbWriteCommand
+    {
+        Type "Struct"
+        Members
+        {
+            "sql_statement": "String"
+            "bindings_json": "String"
+        }
+    }
+
+    @storage(CoreStorage::users)
+    @storage(CoreStorage::secure_variables)
+    @diagram(WalQueueFlow)
+    Contract enqueueWrite
+    {
+        Signature "enqueueWrite(command: DatabaseWalQueue::DbWriteCommand)" -> "Boolean"
+
+        Requires "WAL queue channel is initialized."
+
+        Ensures "Pushes write command to the MPSC buffer for asynchronous execution."
+
+        Precondition
+        {
+            "sql_statement must be non-empty."
+            "Queue must not be closed."
+        }
+
+        Postcondition
+        {
+            "Command is queued for background SQLite execution."
+        }
+
+        Process
+        {
+            1. "Obtain sender handle for Tokio MPSC write channel."
+            2. "Push DbWriteCommand to the buffer."
+            3. "If channel is saturated, return error QueueOverflow."
+            4. "Notify background worker thread of new pending write."
+            5. "Return true."
+        }
+
+        Errors
+        {
+            "QueueOverflow"
+            "QueueClosed"
+        }
+    }
+
+    @storage(CoreStorage::users)
+    @storage(CoreStorage::secure_variables)
+    @diagram(WalQueueFlow)
+    Contract processQueueLoop
+    {
+        Signature "processQueueLoop()" -> "Boolean"
+
+        Requires "Active SQLCipher database connection pool."
+
+        Ensures "Continually dequeues write commands and commits them in background WAL transactions."
+
+        Precondition
+        {
+            "Worker pool is active."
+        }
+
+        Postcondition
+        {
+            "Dequeued commands are committed inside active transactions."
+        }
+
+        Process
+        {
+            1. "Await incoming DbWriteCommand from MPSC receiver."
+            2. "Acquire writer connection from SQLx pool."
+            3. "Begin database transaction."
+            4. "Execute sql_statement with binding parameters."
+            5. "Commit database transaction."
+            6. "Wipe transient parameter memory."
+            7. "Repeat loop."
+        }
+
+        Errors
+        {
+            "TransactionFailed"
+            "DiskIoError"
+        }
+    }
+}

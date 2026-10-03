@@ -1,0 +1,269 @@
+Protocol SlowSpeedBusProtocol
+{
+    !Note [[
+        Asynchronous MPMC channel designed for handling non-streaming, static, and query-based transaction messages
+        such as symbol search suggestions, historical news feeds, and profile data. Intercepts incoming payloads into an
+        in-memory RAM cache before database persistence, serving cached responses directly when data is unchanged.
+    ]]
+
+    !Diagram SlowSpeedFlow
+    [[
+        ```mermaid
+        flowchart TD
+            Caller([Static Query Request]) --> Router[RouterService::dispatchStream]
+            Router --> Bus[SlowSpeedEventPipe]
+            Bus --> DB[DatabaseService::executeQuery]
+        ```
+    ]]
+
+    @component(RouterService::dispatchStream)
+    @component(DatabaseService::executeQuery)
+    @component(RouterService::EventEnvelope)
+    @storage(CoreStorage::static_query_cache)
+    @diagram(SlowSpeedFlow)
+    Channel SlowSpeedEventPipe
+    {
+        Pattern "PointToPoint"
+        Transport "tokio::sync::mpsc (RAM Cache Interceptor)"
+        Sender "RouterService::dispatchStream"
+        Receiver "DatabaseService::executeQuery"
+        Payload "RouterService::EventEnvelope"
+
+        Errors
+        {
+            "ChannelFull"
+            "CacheMiss"
+        }
+    }
+}
+
+Protocol HighSpeedBusProtocol
+{
+    !Note [[
+        In-memory, high-throughput multi-producer, multi-consumer event stream bus implemented using Tokio broadcast channels.
+        Handles real-time data flows (tick indicators, order books) fanning out binary packets directly to in-memory widget
+        buffers at microsecond latencies, completely bypassing disk storage and database queues.
+    ]]
+
+    !Diagram HighSpeedFlow
+    [[
+        ```mermaid
+        flowchart TD
+            Market([Live Market Stream]) --> Router[RouterService::dispatchStream]
+            Router --> Broadcast[HighSpeedBroadcastPipe]
+            Broadcast --> Aligner[StreamAligner::bufferStreamEvent]
+        ```
+    ]]
+
+    @component(RouterService::dispatchStream)
+    @component(StreamAligner::bufferStreamEvent)
+    @component(RouterService::StreamEnvelope)
+    @diagram(HighSpeedFlow)
+    Channel HighSpeedBroadcastPipe
+    {
+        Pattern "AsyncBroadcast"
+        Transport "tokio::sync::broadcast (Capacity: 65536)"
+        Sender "RouterService::dispatchStream"
+        Receiver "StreamAligner::bufferStreamEvent"
+        Payload "RouterService::StreamEnvelope"
+
+        Errors
+        {
+            "ChannelLagged"
+            "CircularLoopDetected"
+        }
+    }
+}
+
+Protocol SlintUiProtocol
+{
+    !Note [[
+        In-process communication protocol governing property bindings and action callbacks between the Slint native GUI
+        retained scene graph and the Rust Core engine. Operates with zero IPC serialization overhead.
+    ]]
+
+    !Diagram SlintIpcFlow
+    [[
+        ```mermaid
+        flowchart TD
+            SlintUI([Slint Native Widget]) --> Canvas[SlintCanvasCoordinator::mountDeclarativeWidget]
+            Canvas --> CmdPipe[SlintCommandDispatchPipe]
+            CmdPipe --> Router[RouterService::routeCommand]
+            Registry[RegistryService::setContext] --> BindingPipe[SlintContextBindingPipe]
+            BindingPipe --> RouterCtx[RouterService::routeContextChange]
+        ```
+    ]]
+
+    @component(SlintCanvasCoordinator::mountDeclarativeWidget)
+    @component(RouterService::routeCommand)
+    @component(RouterService::CommandRequestPayload)
+    @diagram(SlintIpcFlow)
+    Channel SlintCommandDispatchPipe
+    {
+        Pattern "PointToPoint"
+        Transport "In-Process Action Callback (Zero-Copy)"
+        Sender "SlintCanvasCoordinator::mountDeclarativeWidget"
+        Receiver "RouterService::routeCommand"
+        Payload "RouterService::CommandRequestPayload"
+    }
+
+    @component(RegistryService::setContext)
+    @component(RouterService::routeContextChange)
+    @component(RegistryService::ContextChangePayload)
+    @diagram(SlintIpcFlow)
+    Channel SlintContextBindingPipe
+    {
+        Pattern "AsyncBroadcast"
+        Transport "In-Process Slint Model Property Binding"
+        Sender "RegistryService::setContext"
+        Receiver "RouterService::routeContextChange"
+        Payload "RegistryService::ContextChangePayload"
+    }
+}
+
+Protocol PluginIpcProtocol
+{
+    !Note [[
+        Inter-process communication protocols between Core host and out-of-process plugin instances.
+        Governs native gRPC streaming over local Unix Domain Sockets or Windows Named Pipes, and phased shutdown signals.
+    ]]
+
+    !Diagram PluginIpcFlow
+    [[
+        ```mermaid
+        flowchart TD
+            SocketMgr[GrpcSocketManager::sendMessage] --> GrpcPipe[GrpcChannelPipe]
+            GrpcPipe --> Supervisor[ProcessSupervisor::spawnSubprocess]
+            Teardown[TeardownEngine::triggerShutdown] --> SignalPipe[TeardownSignalPipe]
+            SignalPipe --> TermSupervisor[ProcessSupervisor::terminateSubprocess]
+        ```
+    ]]
+
+    @component(GrpcSocketManager::sendMessage)
+    @component(ProcessSupervisor::spawnSubprocess)
+    @component(ProcessSupervisor::PluginInitPayload)
+    @diagram(PluginIpcFlow)
+    Channel GrpcChannelPipe
+    {
+        Pattern "PointToPoint"
+        Transport "Tonic gRPC (Unix Domain Sockets / Windows Named Pipes)"
+        Sender "GrpcSocketManager::sendMessage"
+        Receiver "ProcessSupervisor::spawnSubprocess"
+        Payload "ProcessSupervisor::PluginInitPayload"
+    }
+
+    @component(TeardownEngine::triggerShutdown)
+    @component(ProcessSupervisor::terminateSubprocess)
+    @component(TeardownEngine::TeardownSignalPayload)
+    @diagram(PluginIpcFlow)
+    Channel TeardownSignalPipe
+    {
+        Pattern "AsyncBroadcast"
+        Transport "Async Signal Broadcast (Shutdown RPC)"
+        Sender "TeardownEngine::triggerShutdown"
+        Receiver "ProcessSupervisor::terminateSubprocess"
+        Payload "TeardownEngine::TeardownSignalPayload"
+    }
+}
+
+Protocol AuthenticationProtocol
+{
+    !Note [[
+        In-process protocol governing user authentication requests, credential verification dispatch,
+        and authenticated session token state transitions between Slint native UI views and AuthenticationService.
+    ]]
+
+    !Diagram AuthProtocolFlow
+    [[
+        ```mermaid
+        flowchart TD
+            SlintUI([Slint Auth View]) --> AuthPipe[UserAuthCommandPipe]
+            AuthPipe --> AuthSvc[AuthenticationService::authenticateUser]
+            AuthSvc --> SessionPipe[SessionTokenEventPipe]
+            SessionPipe --> Router[RouterService::routeContextChange]
+        ```
+    ]]
+
+    @component(SlintCanvasCoordinator::mountDeclarativeWidget)
+    @component(AuthenticationService::authenticateUser)
+    @component(AuthenticationService::AuthCredentials)
+    @diagram(AuthProtocolFlow)
+    Channel UserAuthCommandPipe
+    {
+        Pattern "PointToPoint"
+        Transport "In-Process Action Callback (Zero-Copy)"
+        Sender "SlintCanvasCoordinator::mountDeclarativeWidget"
+        Receiver "AuthenticationService::authenticateUser"
+        Payload "AuthenticationService::AuthCredentials"
+
+        Errors
+        {
+            "InvalidCredentials"
+            "ChannelDisconnected"
+        }
+    }
+
+    @component(AuthenticationService::authenticateUser)
+    @component(RouterService::routeContextChange)
+    @component(AuthenticationService::AuthSessionToken)
+    @diagram(AuthProtocolFlow)
+    Channel SessionTokenEventPipe
+    {
+        Pattern "AsyncBroadcast"
+        Transport "In-Process Session Property Binding"
+        Sender "AuthenticationService::authenticateUser"
+        Receiver "RouterService::routeContextChange"
+        Payload "AuthenticationService::AuthSessionToken"
+    }
+}
+
+Protocol PluginEnforcementProtocol
+{
+    !Note [[
+        In-process governance protocol operating between RouterService and PluginPolicyEnforcer.
+        Intercepts commands and stream dispatches to verify capability manifests and broadcast security violations.
+    ]]
+
+    !Diagram EnforcementProtocolFlow
+    [[
+        ```mermaid
+        flowchart TD
+            Router([RouterService::dispatchStream]) --> ValidPipe[PolicyValidationPipe]
+            ValidPipe --> Enforcer[PluginPolicyEnforcer::enforceDataFeedEmission]
+            Enforcer --> ViolationPipe[PolicyViolationPipe]
+            ViolationPipe --> Terminate[ProcessSupervisor::terminateSubprocess]
+        ```
+    ]]
+
+    @component(RouterService::dispatchStream)
+    @component(PluginPolicyEnforcer::enforceDataFeedEmission)
+    @component(RouterService::StreamEnvelope)
+    @diagram(EnforcementProtocolFlow)
+    Channel PolicyValidationPipe
+    {
+        Pattern "PointToPoint"
+        Transport "In-Process Direct Method Call"
+        Sender "RouterService::dispatchStream"
+        Receiver "PluginPolicyEnforcer::enforceDataFeedEmission"
+        Payload "RouterService::StreamEnvelope"
+
+        Errors
+        {
+            "StreamingAccessToSlowBusBlocked"
+            "UndeclaredVariableBlocked"
+        }
+    }
+
+    @component(PluginPolicyEnforcer::enforceDataFeedEmission)
+    @component(ProcessSupervisor::terminateSubprocess)
+    @component(PluginPolicyEnforcer::PolicyCheckResult)
+    @diagram(EnforcementProtocolFlow)
+    Channel PolicyViolationPipe
+    {
+        Pattern "AsyncBroadcast"
+        Transport "tokio::sync::broadcast (Capacity: 1024)"
+        Sender "PluginPolicyEnforcer::enforceDataFeedEmission"
+        Receiver "ProcessSupervisor::terminateSubprocess"
+        Payload "PluginPolicyEnforcer::PolicyCheckResult"
+    }
+}

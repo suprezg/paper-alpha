@@ -1,0 +1,125 @@
+Component DeclarativeSchemaEngine
+{
+    !Note [[
+        Strict declarative UI schema parser and validator for Paper-Alpha plugin manifests.
+        Parses nested JSON schema trees declaring native UI elements (Card, Tile, Grid, Group, Container),
+        Plotters visual charts (CandlestickChart, LineChart, BarChart, HistogramChart, PieChart, ScatterPlotChart, ThreeDPlot),
+        data tables, lists, feeds, and interactive form controls (InputField, Button, Dropdown, Toggle, Slider).
+        Instantiates validated schema trees into active Slint UI model components.
+    ]]
+
+    !Diagram SchemaEngineFlow
+    [[
+        ```mermaid
+        flowchart TD
+            Manifest([Plugin manifest.json]) --> Parse[DeclarativeSchemaEngine::parseWidgetSchema]
+            Parse --> ValidateType{Valid Node Types & Properties?}
+            ValidateType -- Invalid --> Reject[Return Validation Error]
+            ValidateType -- Valid --> BuildTree[Build In-Memory Component Tree]
+            BuildTree --> Instantiate[DeclarativeSchemaEngine::instantiateSlintComponents]
+            Instantiate --> SlintViews[Active Slint UI Components in Model]
+        ```
+    ]]
+
+    Invariants
+    {
+        "StrictValidation: All widget nodes in manifest.json must strictly match known schema component types."
+        "RecursiveNesting: Container nodes (Card, Tile, Grid, Group) must recursively validate child element trees."
+        "PropertyTypeSafety: Component properties must conform strictly to expected primitive types and enums."
+    }
+
+    Model ParsedWidgetTree
+    {
+        Type "Struct"
+        Members
+        {
+            "root_element_type": "String"
+            "tree_component_id": "String"
+            "total_children_count": "Int"
+        }
+    }
+
+    Model SchemaValidationReport
+    {
+        Type "Struct"
+        Members
+        {
+            "is_schema_valid": "Boolean"
+            "elements_parsed": "Int"
+            "schema_error_message": "String"
+        }
+    }
+
+    @diagram(SchemaEngineFlow)
+    Contract parseWidgetSchema
+    {
+        Signature "parseWidgetSchema(manifest_json: String)" -> "DeclarativeSchemaEngine::SchemaValidationReport"
+
+        Requires "serde_json deserializer is available."
+
+        Ensures "Validates declarative widget schema and rejects unknown elements or malformed properties."
+
+        Precondition
+        {
+            "manifest_json contains non-empty 'widgets' array."
+        }
+
+        Postcondition
+        {
+            "SchemaValidationReport indicates structural validity."
+        }
+
+        Process
+        {
+            1. "Extract 'widgets' array from manifest_json."
+            2. "Iterate widget definitions and recursively parse 'root_element'."
+            3. "Verify type matches supported catalog (Card, Tile, Grid, Group, CandlestickChart, LineChart, BarChart, HistogramChart, PieChart, ScatterPlotChart, ThreeDPlot, DataTable, List, Feed, InputField, Button, Dropdown, Toggle, Slider)."
+            4. "Verify nested children arrays for container elements."
+            5. "Validate data_source topic strings and action identifiers."
+            6. "Return SchemaValidationReport."
+        }
+
+        Errors
+        {
+            "UnknownElementType"
+            "MissingRequiredProperty"
+            "InvalidDataSource"
+        }
+    }
+
+    @diagram(SchemaEngineFlow)
+    Contract instantiateSlintComponents
+    {
+        Signature "instantiateSlintComponents(schema_tree_json: String)" -> "DeclarativeSchemaEngine::ParsedWidgetTree"
+
+        Requires "Schema has passed parseWidgetSchema validation."
+
+        Ensures "Constructs dynamic Slint UI component tree and binds data streams to Router topic feeds."
+
+        Precondition
+        {
+            "schema_tree_json is valid validated JSON."
+        }
+
+        Postcondition
+        {
+            "Slint view hierarchy is generated and mounted in active workspace model."
+        }
+
+        Process
+        {
+            1. "Deserialize validated schema tree into memory struct."
+            2. "Create Slint view component instances for each element."
+            3. "Bind chart elements to PlottersChartRenderer render handles."
+            4. "Register input field and button callbacks to dispatch_plugin_command."
+            5. "Package metadata into ParsedWidgetTree."
+            6. "Return ParsedWidgetTree."
+        }
+
+        Errors
+        {
+            "InstantiationFailed"
+            "BindingError"
+        }
+    }
+}

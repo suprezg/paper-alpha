@@ -1,0 +1,224 @@
+Component PluginPolicyEnforcer
+{
+    !Note [[
+        Real-time governance and policy monitor enforcing structural compliance across Paper-Alpha plugins.
+        Enforces manifest.json structural and capability restrictions in close coordination with RouterService:
+        - Data Feed Plugins:
+          - If a variable/stream is declared as 'streaming', it can ONLY broadcast over the High Speed Bus; it is strictly prohibited from accessing the Slow Speed Bus.
+          - If declared as 'non_streaming', it is restricted to the Slow Speed Bus.
+          - Cannot alter or mutate any variable or topic outside its manifest 'emits' declaration.
+        - Data Consumer Plugins:
+          - Can ONLY consume topics or variables explicitly declared in its manifest 'consumes' declaration.
+          - Strictly prohibited from emitting or sending stream data.
+          - Strictly prohibited from directly calling or invoking other plugins (inter-plugin isolation).
+        Collaborates directly with RouterService to intercept commands, stream envelopes, and connections, blocking any policy violation before execution.
+    ]]
+
+    !Diagram PolicyEnforcementFlow
+    [[
+        ```mermaid
+        flowchart TD
+            Scan([Plugin Scanner]) --> RegPolicy[PluginPolicyEnforcer::registerPluginPolicy]
+            RegPolicy --> PolicyMap[(Active Manifest Policy Rules)]
+            RouterStream([RouterService::dispatchStream]) --> CheckFeed[PluginPolicyEnforcer::enforceDataFeedEmission]
+            CheckFeed --> PolicyMap
+            CheckFeed --> CheckFeedDecision{Compliant with manifest.json emits?}
+            CheckFeedDecision -- "Streaming Feed -> Slow Bus (Violation)" --> BlockStream[Block Stream & Log Violation]
+            CheckFeedDecision -- "Undeclared Variable Mutation" --> BlockStream
+            CheckFeedDecision -- Permitted --> HighSpeed[Forward to Bus Protocol]
+            RouterCmd([RouterService::routeCommand]) --> CheckCons[PluginPolicyEnforcer::enforceDataConsumerAccess]
+            CheckCons --> PolicyMap
+            CheckCons --> CheckConsDecision{Compliant with manifest.json consumes?}
+            CheckConsDecision -- "Consumer Sends Data (Violation)" --> BlockCmd[Block Command & Log Violation]
+            CheckConsDecision -- "Consumer Calls Other Plugin (Violation)" --> BlockCmd
+            CheckConsDecision -- "Undeclared Topic Consumption" --> BlockCmd
+            CheckConsDecision -- Permitted --> ForwardCmd[Forward Command]
+        ```
+    ]]
+
+    Invariants
+    {
+        "DataFeedIsolation: Data Feed plugins declared as streaming are strictly denied access to the Slow Speed Bus, and can never alter undeclared variables."
+        "ConsumerReadExclusivity: Data Consumer plugins can strictly consume declared streams and are forbidden from transmitting stream envelopes or calling other plugins."
+        "ZeroTrustRouting: Every message and stream routed by RouterService must pass policy verification against the plugin manifest declaration."
+    }
+
+    Model ManifestPolicy
+    {
+        Type "Struct"
+        Members
+        {
+            "policy_plugin_id": "String"
+            "policy_plugin_category": "String"
+            "emits_topics_json": "String"
+            "consumes_topics_json": "String"
+            "is_policy_active": "Boolean"
+        }
+    }
+
+    Model PolicyCheckResult
+    {
+        Type "Struct"
+        Members
+        {
+            "check_permitted": "Boolean"
+            "violation_reason": "String"
+            "enforcement_action": "String"
+            "timestamp_ns": "Int"
+        }
+    }
+
+    Model PolicyViolationLog
+    {
+        Type "Struct"
+        Members
+        {
+            "violation_id": "UUID"
+            "offending_plugin_id": "String"
+            "attempted_action": "String"
+            "rule_breached": "String"
+        }
+    }
+
+    @diagram(PolicyEnforcementFlow)
+    Contract registerPluginPolicy
+    {
+        Signature "registerPluginPolicy(plugin_id: String, category: String, emits_json: String, consumes_json: String)" -> "Boolean"
+
+        Requires "Plugin manifest has passed schema validation."
+
+        Ensures "Stores compiled plugin capability policy into active memory map."
+
+        Precondition
+        {
+            "plugin_id is unique non-empty string."
+            "category is one of: data_feed, data_consumer."
+        }
+
+        Postcondition
+        {
+            "Policy rules are registered and enforced on future router dispatches."
+        }
+
+        Process
+        {
+            1. "Parse declared emits_json and consumes_json into fast lookup sets."
+            2. "Construct ManifestPolicy entry with policy_plugin_id=plugin_id."
+            3. "Insert policy into concurrent policy registry map."
+            4. "Return true."
+        }
+
+        Errors
+        {
+            "InvalidPolicyData"
+            "DuplicatePolicy"
+        }
+    }
+
+    @diagram(PolicyEnforcementFlow)
+    Contract enforceDataFeedEmission
+    {
+        Signature "enforceDataFeedEmission(publisher_id: String, target_topic: String, is_streaming_channel: Boolean)" -> "PluginPolicyEnforcer::PolicyCheckResult"
+
+        Requires "Policy rules registered for publisher_id."
+
+        Ensures "Validates that target_topic is declared in emits, transmission mode matches, and undeclared mutations are blocked."
+
+        Precondition
+        {
+            "publisher_id and target_topic are non-empty strings."
+        }
+
+        Postcondition
+        {
+            "Returns PolicyCheckResult permitting or rejecting stream dispatch."
+        }
+
+        Process
+        {
+            1. "Lookup ManifestPolicy for publisher_id."
+            2. "Verify publisher is categorized as 'data_feed'."
+            3. "If target_topic not in emits_topics_json, return check_permitted=false with violation_reason='UndeclaredVariableOrTopic'."
+            4. "Extract declared transmission type for topic from manifest policy."
+            5. "If is_streaming_channel is false (attempting to use Slow Speed Bus) and manifest declares topic as 'streaming', return check_permitted=false with violation_reason='StreamingFeedCannotAccessSlowBus'."
+            6. "If is_streaming_channel is true and manifest declares topic as 'non_streaming', return check_permitted=false with violation_reason='NonStreamingFeedCannotUseHighSpeedBus'."
+            7. "Verify plugin is not attempting unauthorized context variable mutation."
+            8. "Return PolicyCheckResult with check_permitted=true."
+        }
+
+        Errors
+        {
+            "PolicyNotFound"
+            "PolicyViolation"
+        }
+    }
+
+    @diagram(PolicyEnforcementFlow)
+    Contract enforceDataConsumerAccess
+    {
+        Signature "enforceDataConsumerAccess(consumer_id: String, requested_target: String, is_send_attempt: Boolean)" -> "PluginPolicyEnforcer::PolicyCheckResult"
+
+        Requires "Policy rules registered for consumer_id."
+
+        Ensures "Verifies that consumer only reads declared topics, never sends data, and does not invoke other plugins directly."
+
+        Precondition
+        {
+            "consumer_id and requested_target are non-empty strings."
+        }
+
+        Postcondition
+        {
+            "Returns PolicyCheckResult permitting or blocking consumer action."
+        }
+
+        Process
+        {
+            1. "Lookup ManifestPolicy for consumer_id."
+            2. "Verify consumer is categorized as 'data_consumer'."
+            3. "If is_send_attempt is true, return check_permitted=false with violation_reason='DataConsumerCannotSendData'."
+            4. "If requested_target represents an external plugin ID, return check_permitted=false with violation_reason='DirectInterPluginCallsForbidden'."
+            5. "If requested_target is not in consumes_topics_json, return check_permitted=false with violation_reason='UndeclaredTopicConsumption'."
+            6. "Return PolicyCheckResult with check_permitted=true."
+        }
+
+        Errors
+        {
+            "PolicyNotFound"
+            "PolicyViolation"
+        }
+    }
+
+    @diagram(PolicyEnforcementFlow)
+    Contract logPolicyViolation
+    {
+        Signature "logPolicyViolation(violation: PluginPolicyEnforcer::PolicyViolationLog)" -> "Boolean"
+
+        Requires "Policy violation was detected."
+
+        Ensures "Records violation log and notifies ProcessSupervisor to terminate offending plugin if critical."
+
+        Precondition
+        {
+            "violation contains valid offending_plugin_id."
+        }
+
+        Postcondition
+        {
+            "Violation recorded in diagnostics audit log."
+        }
+
+        Process
+        {
+            1. "Format violation log entry."
+            2. "Append to security audit buffer."
+            3. "Emit violation notification signal."
+            4. "Return true."
+        }
+
+        Errors
+        {
+            "LogBufferFull"
+        }
+    }
+}

@@ -1,0 +1,220 @@
+Component RouterService
+{
+    !Note [[
+        Central message routing engine directing commands, task requests, and data envelopes between
+        Slint native UI views, plugin subprocesses (gRPC sidecars and WASM instances), and Core internal services.
+        Acts as the central traffic dispatcher of the microkernel architecture, collaborating directly with
+        PluginPolicyEnforcer to verify that plugins strictly adhere to their manifest capabilities and structural rules.
+    ]]
+
+    !Diagram RouterDispatchFlow
+    [[
+        ```mermaid
+        flowchart TD
+            Input([Incoming Message / Stream]) --> CheckType{Stream or Command?}
+            CheckType -- Command --> CheckConsumer[PluginPolicyEnforcer::enforceDataConsumerAccess]
+            CheckConsumer --> PassConsumer{Permitted?}
+            PassConsumer -- No --> RejectCmd[Reject with PolicyViolation]
+            PassConsumer -- Yes --> RouteCmd[RouterService::routeCommand]
+            CheckType -- ContextChange --> RouteCtx[RouterService::routeContextChange]
+            CheckType -- Stream --> CheckLoop{In hop_trace?}
+            CheckLoop -- Yes --> Discard[Drop Envelope]
+            CheckLoop -- No --> CheckFeed[PluginPolicyEnforcer::enforceDataFeedEmission]
+            CheckFeed --> PassFeed{Permitted?}
+            PassFeed -- No (e.g. Streaming Feed -> Slow Bus) --> RejectStream[Drop & Emit PolicyViolation]
+            PassFeed -- Yes --> DispatchStream[RouterService::dispatchStream]
+            DispatchStream --> Realtime{Is Realtime?}
+            Realtime -- Yes --> TokioBus[HighSpeedBusProtocol::HighSpeedBroadcastPipe]
+            Realtime -- No --> MpscBus[SlowSpeedBusProtocol::SlowSpeedEventPipe]
+        ```
+    ]]
+
+    Invariants
+    {
+        "RouteIntegrity: All active routes must map to registered and healthy plugins in the Registry."
+        "PolicyCompliance: All dispatches and commands must be verified by PluginPolicyEnforcer before transmission."
+        "FastPathIsolation: High-frequency stream envelopes must bypass SQLCipher and route directly to Tokio broadcast channels."
+        "CyclePrevention: Incoming stream envelopes must not contain the receiving plugin ID in the hop_trace history."
+    }
+
+    Model RouteEntry
+    {
+        Type "Struct"
+        Members
+        {
+            "route_plugin_id": "String (min_length=1, max_length=128)"
+            "transport": "String"
+            "active_subscriptions": "String"
+        }
+    }
+
+    Model CommandResponse
+    {
+        Type "Struct"
+        Members
+        {
+            "resp_request_id": "UUID"
+            "resp_success": "Boolean"
+            "resp_result": "String"
+            "resp_error_code": "String"
+        }
+    }
+
+    Model CommandRequestPayload
+    {
+        Type "Struct"
+        Members
+        {
+            "req_request_id": "UUID"
+            "req_action": "String"
+            "req_payload": "String"
+            "caller_widget_instance_id": "String"
+        }
+    }
+
+    Model EventEnvelope
+    {
+        Type "Struct"
+        Members
+        {
+            "event_id": "UUID"
+            "event_topic": "String (max_length=255)"
+            "event_payload": "String"
+            "event_timestamp": "Date"
+        }
+    }
+
+    Model StreamEnvelope
+    {
+        Type "Struct"
+        Members
+        {
+            "stream_topic": "String (max_length=255)"
+            "publisher_plugin_id": "String (max_length=128)"
+            "timestamp_ns": "Int"
+            "sequence_id": "Int"
+            "hop_trace": "String"
+            "binary_payload": "String"
+        }
+    }
+
+    @component(PluginPolicyEnforcer::enforceDataConsumerAccess)
+    @protocol(SlintUiProtocol::SlintCommandDispatchPipe)
+    @diagram(RouterDispatchFlow)
+    Contract routeCommand
+    {
+        Signature "routeCommand(request: RouterService::CommandRequestPayload)" -> "RouterService::CommandResponse"
+
+        Requires "Target plugin must be registered and active in the central Registry."
+
+        Ensures "Forwards command payload to plugin over gRPC or WASM memory and returns response to caller widget."
+
+        Precondition
+        {
+            "Request ID and action verb must be non-empty strings."
+            "Target plugin route must exist in active routing table."
+        }
+
+        Postcondition
+        {
+            "Response matching the incoming request ID is returned."
+        }
+
+        Process
+        {
+            1. "Lookup target plugin route in the Registry routing table."
+            2. "Validate caller and target permissions via PluginPolicyEnforcer::enforceDataConsumerAccess (ensuring consumers only read declared topics, never emit data, and never make direct inter-plugin calls)."
+            3. "If check_permitted is false, return ExecutionError with policy violation reason."
+            4. "Serialize command parameters into standard Protobuf CommandRequest."
+            5. "Transmit payload over UDS socket, Windows Named Pipe, or WASM memory buffer."
+            6. "Await response or trigger timeout after 5000ms."
+            7. "Deserialize response into CommandResponse struct and return."
+        }
+
+        Errors
+        {
+            "RouteNotFound"
+            "Timeout"
+            "ExecutionError"
+            "PolicyViolation"
+        }
+    }
+
+    @protocol(SlintUiProtocol::SlintContextBindingPipe)
+    @diagram(RouterDispatchFlow)
+    Contract routeContextChange
+    {
+        Signature "routeContextChange(event: RegistryService::ContextChangePayload)" -> "Boolean"
+
+        Requires "Context mutation has been successfully registered in RegistryService."
+
+        Ensures "Broadcasts OnContextChanged RPC to all subscribed plugins and updates Slint UI model properties."
+
+        Precondition
+        {
+            "Context key must be a valid registered identifier."
+        }
+
+        Postcondition
+        {
+            "All subscribed plugins and Slint widgets receive updated context parameters."
+        }
+
+        Process
+        {
+            1. "Query Registry to find all plugins and widgets subscribed to context key."
+            2. "Spawn concurrent Tokio dispatch tasks for matched subscribers."
+            3. "Send OnContextChanged RPC to native subprocesses and WASM instances."
+            4. "Update Slint context property bindings directly in memory."
+            5. "Return true on successful broadcast."
+        }
+
+        Errors
+        {
+            "SubscriberDispatchError"
+        }
+    }
+
+    @component(PluginPolicyEnforcer::enforceDataFeedEmission)
+    @protocol(HighSpeedBusProtocol::HighSpeedBroadcastPipe)
+    @protocol(SlowSpeedBusProtocol::SlowSpeedEventPipe)
+    @diagram(RouterDispatchFlow)
+    Contract dispatchStream
+    {
+        Signature "dispatchStream(envelope: RouterService::StreamEnvelope)" -> "Boolean"
+
+        Requires "Underlying Tokio broadcast bus and MPSC queues are active."
+
+        Ensures "Routes envelope to High Speed Channel or Slow Speed Bus based on topic classification and policy verification."
+
+        Precondition
+        {
+            "The envelope hop_trace must not contain the publisher plugin ID."
+        }
+
+        Postcondition
+        {
+            "Envelope is dispatched to matching subscriber channels."
+        }
+
+        Process
+        {
+            1. "Inspect envelope hop_trace to verify cycle safety."
+            2. "If circular loop detected, discard packet and log diagnostic error."
+            3. "Append current router hop to hop_trace."
+            4. "Determine transmission channel based on real-time classification (is_streaming_channel)."
+            5. "Validate stream emission via PluginPolicyEnforcer::enforceDataFeedEmission (blocking streaming feeds from slow bus, enforcing declared topics, and blocking undeclared variable mutations)."
+            6. "If policy check fails, discard envelope, trigger logPolicyViolation, and return PolicyViolation error."
+            7. "If topic is real-time stream, push envelope to HighSpeedBusProtocol::HighSpeedBroadcastPipe."
+            8. "If topic is static query, push envelope to SlowSpeedBusProtocol::SlowSpeedEventPipe."
+            9. "Return true."
+        }
+
+        Errors
+        {
+            "CircularLoop"
+            "ChannelClosed"
+            "PolicyViolation"
+        }
+    }
+}

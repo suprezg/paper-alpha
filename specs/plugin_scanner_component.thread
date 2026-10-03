@@ -1,0 +1,169 @@
+Component PluginScanner
+{
+    !Note [[
+        Directory scanner and package validator for Paper-Alpha plugins.
+        Recursively scans local plugins/ directory on startup or on user rescan request,
+        parses manifest.json, verifies plugin category ('data_feed' vs 'data_consumer'),
+        validates 'emits' (streaming vs non_streaming) or 'consumes' declarations,
+        validates the declarative widget schema via DeclarativeSchemaEngine,
+        verifies backend execution artifacts (binaries, WASM, or scripts), and registers compliant
+        packages into the Registry and CoreStorage.
+    ]]
+
+    !Diagram ScannerFlow
+    [[
+        ```mermaid
+        flowchart TD
+            Dir([Plugins Folder Path]) --> Scan[PluginScanner::scanDirectory]
+            Scan --> List[List of Plugin Folders]
+            List --> Validate[PluginScanner::validateManifest]
+            Validate --> SchemaCheck[DeclarativeSchemaEngine::parseWidgetSchema]
+            SchemaCheck --> CheckValid{Valid Manifest & Schema?}
+            CheckValid -- Valid --> Register[PluginScanner::registerDiscoveredPlugins]
+            CheckValid -- Invalid --> Warn[Mark Interface Validation Failed]
+            Register --> RegDone[Registered in Core Registry & Storage]
+        ```
+    ]]
+
+    Invariants
+    {
+        "ManifestRequirement: Every compliant plugin must contain a valid, well-formed manifest.json."
+        "SchemaValidation: Compliant plugins must have valid Declarative Widget Schemas matching Core component types."
+        "NonCompliantLocking: Any plugin failing validation must be locked and disabled in the UI."
+    }
+
+    Model PluginFolder
+    {
+        Type "Struct"
+        Members
+        {
+            "folder_name": "String"
+            "folder_path": "String"
+        }
+    }
+
+    Model ManifestValidationResult
+    {
+        Type "Struct"
+        Members
+        {
+            "validation_plugin_id": "String"
+            "is_compliant": "Boolean"
+            "error_message": "String"
+        }
+    }
+
+    @diagram(ScannerFlow)
+    Contract scanDirectory
+    {
+        Signature "scanDirectory(dir_path: String)" -> "String"
+
+        Requires "Filesystem read access on plugin directory."
+
+        Ensures "Discovers all child plugin package folders in target directory."
+
+        Precondition
+        {
+            "dir_path represents valid accessible directory."
+        }
+
+        Postcondition
+        {
+            "Returns list of discovered plugin folder paths."
+        }
+
+        Process
+        {
+            1. "Read directory entries in dir_path."
+            2. "Filter entries that contain manifest.json."
+            3. "Collect folder metadata into list."
+            4. "Return JSON array of plugin folders."
+        }
+
+        Errors
+        {
+            "DirectoryNotFound"
+            "PermissionDenied"
+        }
+    }
+
+    @component(DeclarativeSchemaEngine::parseWidgetSchema)
+    @diagram(ScannerFlow)
+    Contract validateManifest
+    {
+        Signature "validateManifest(manifest_path: String)" -> "PluginScanner::ManifestValidationResult"
+
+        Requires "Manifest file is readable."
+
+        Ensures "Parses JSON, validates metadata, emits/consumes declarations, backend targets, and declarative widgets."
+
+        Precondition
+        {
+            "manifest_path points to existing manifest.json file."
+        }
+
+        Postcondition
+        {
+            "Validation result indicates compliance status."
+        }
+
+        Process
+        {
+            1. "Read raw JSON string from manifest_path."
+            2. "Deserialize into manifest data structure."
+            3. "If JSON malformed, return is_compliant=false with parsing error."
+            4. "Verify mandatory metadata fields: id, name, version, category, backend, widgets."
+            5. "Verify category is strictly 'data_feed' or 'data_consumer'."
+            6. "If category is 'data_feed', verify 'emits' array with streaming or non_streaming type declarations."
+            7. "If category is 'data_consumer', verify 'consumes' array declaring required inputs."
+            8. "Invoke DeclarativeSchemaEngine::parseWidgetSchema on the manifest widgets tree."
+            9. "If schema contains invalid components, return is_compliant=false."
+            10. "Verify existence of declared backend executable, script, or WASM binary."
+            11. "Return ManifestValidationResult."
+        }
+
+        Errors
+        {
+            "ManifestNotFound"
+            "InvalidJson"
+            "MissingEmitsDeclaration"
+            "MissingConsumesDeclaration"
+            "InvalidCategory"
+            "SchemaValidationError"
+        }
+    }
+
+    @storage(CoreStorage::plugin_configs)
+    @diagram(ScannerFlow)
+    Contract registerDiscoveredPlugins
+    {
+        Signature "registerDiscoveredPlugins(plugin_id: String, category: String, install_path: String)" -> "Boolean"
+
+        Requires "Plugin passed manifest validation."
+
+        Ensures "Registers plugin metadata in DashMap registry and persists entry to CoreStorage::plugin_configs."
+
+        Precondition
+        {
+            "plugin_id is unique."
+        }
+
+        Postcondition
+        {
+            "Plugin is listed in registry."
+        }
+
+        Process
+        {
+            1. "Create PluginMetadata struct."
+            2. "Register plugin in RegistryService."
+            3. "Persist plugin record in CoreStorage::plugin_configs."
+            4. "Return true."
+        }
+
+        Errors
+        {
+            "RegistrationFailed"
+        }
+    }
+}

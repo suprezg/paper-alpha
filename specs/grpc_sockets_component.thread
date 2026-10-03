@@ -1,0 +1,155 @@
+Component GrpcSocketManager
+{
+    !Note [[
+        Manages local inter-process communication (IPC) for native out-of-process plugins.
+        Initializes Tonic gRPC servers listening on Unix Domain Sockets (/tmp/paper-alpha-*.sock on Linux/macOS)
+        or Windows Named Pipes, serving as the low-overhead transport layer for Protobuf message streaming.
+    ]]
+
+    !Diagram GrpcFlow
+    [[
+        ```mermaid
+        flowchart TD
+            Path([Socket Path]) --> Bind[GrpcSocketManager::bindSocket]
+            Bind --> Listener[SocketListener Active]
+            Listener --> Accept[GrpcSocketManager::acceptConnection]
+            Accept --> Stream[GrpcStream Established]
+            Data([Protobuf Bytes]) --> Send[GrpcSocketManager::sendMessage]
+            Stream --> Send
+            Send --> Outbound[Transmitted over IPC]
+        ```
+    ]]
+
+    Invariants
+    {
+        "LocalIpcOnly: gRPC sockets must bind strictly to local UDS or Named Pipes and NEVER expose public TCP/IP ports."
+        "FilePermissions: Socket files must be restricted to the active host user process permissions."
+        "LowOverhead: Bi-directional socket communication overhead must not exceed 50 microseconds."
+    }
+
+    Model SocketListener
+    {
+        Type "Struct"
+        Members
+        {
+            "socket_path": "String"
+            "is_listening": "Boolean"
+        }
+    }
+
+    Model GrpcStream
+    {
+        Type "Struct"
+        Members
+        {
+            "stream_id": "UUID"
+            "peer_plugin_id": "String"
+        }
+    }
+
+    @diagram(GrpcFlow)
+    Contract bindSocket
+    {
+        Signature "bindSocket(socket_path: String)" -> "GrpcSocketManager::SocketListener"
+
+        Requires "Host process possesses filesystem write permissions on target directory."
+
+        Ensures "Sweeps stale socket file and binds Unix Domain Socket or Named Pipe listener."
+
+        Precondition
+        {
+            "socket_path represents valid local filesystem path."
+        }
+
+        Postcondition
+        {
+            "Socket listener is bound and waiting for incoming plugin connections."
+        }
+
+        Process
+        {
+            1. "Check if socket_path already exists on filesystem."
+            2. "If exists, remove stale socket file."
+            3. "Initialize UnixListener or Named Pipe server."
+            4. "Bind listener to socket_path."
+            5. "Set file permissions to 0600 (owner read/write only)."
+            6. "Return SocketListener."
+        }
+
+        Errors
+        {
+            "SocketBindFailed"
+            "PermissionDenied"
+        }
+    }
+
+    @diagram(GrpcFlow)
+    Contract acceptConnection
+    {
+        Signature "acceptConnection(listener: GrpcSocketManager::SocketListener)" -> "GrpcSocketManager::GrpcStream"
+
+        Requires "Socket listener is active."
+
+        Ensures "Accepts incoming connection handshake from spawned plugin subprocess."
+
+        Precondition
+        {
+            "listener.is_listening is true."
+        }
+
+        Postcondition
+        {
+            "Active GrpcStream session is established."
+        }
+
+        Process
+        {
+            1. "Await incoming connection on listener socket."
+            2. "Perform gRPC handshake."
+            3. "Extract peer plugin metadata."
+            4. "Generate stream ID."
+            5. "Return GrpcStream."
+        }
+
+        Errors
+        {
+            "ConnectionTimeout"
+            "HandshakeFailed"
+        }
+    }
+
+    @protocol(PluginIpcProtocol::GrpcChannelPipe)
+    @diagram(GrpcFlow)
+    Contract sendMessage
+    {
+        Signature "sendMessage(stream: GrpcSocketManager::GrpcStream, payload: String)" -> "Boolean"
+
+        Requires "Stream connection is open and active."
+
+        Ensures "Writes Protobuf payload bytes to local socket buffer."
+
+        Precondition
+        {
+            "payload is non-empty."
+        }
+
+        Postcondition
+        {
+            "Bytes are transmitted to plugin subprocess."
+        }
+
+        Process
+        {
+            1. "Encode payload into gRPC message frame."
+            2. "Write frame to socket stream."
+            3. "Flush socket write buffer."
+            4. "Return true."
+        }
+
+        Errors
+        {
+            "StreamClosed"
+            "WriteError"
+        }
+    }
+}

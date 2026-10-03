@@ -1,0 +1,145 @@
+Component TopicRefCounter
+{
+    !Note [[
+        Reference-Counted Topic Subscription Registry managing resource hibernation during tab navigation.
+        Tracks active widget subscription counts per topic using atomic counters.
+        When a topic's active subscribers transition 1 -> 0 (e.g. navigating away from an active tab), Core sends
+        PauseStream to the data feed plugin to hibernate background network/CPU work.
+        When subscribers transition 0 -> 1, Core sends ResumeStream to wake the feed.
+    ]]
+
+    !Diagram RefCounterFlow
+    [[
+        ```mermaid
+        flowchart TD
+            Mount([Widget Mounts / Subscribes]) --> Inc[TopicRefCounter::incrementSubscription]
+            Inc --> CheckZero{Was count 0?}
+            CheckZero -- Yes (0 -> 1) --> Resume[Send ResumeStream RPC to Plugin]
+            CheckZero -- No (>1) --> DoneInc[Increment Counter]
+            Unmount([Widget Unmounts / Tab Switch]) --> Dec[TopicRefCounter::decrementSubscription]
+            Dec --> CheckOne{Is new count 0?}
+            CheckOne -- Yes (1 -> 0) --> Pause[Send PauseStream RPC to Plugin (Hibernate)]
+            CheckOne -- No (>0) --> DoneDec[Decrement Counter]
+        ```
+    ]]
+
+    Invariants
+    {
+        "NonNegativeCount: Active subscriber counts for any topic key must never drop below 0."
+        "EdgeTriggeredSignals: PauseStream and ResumeStream RPCs must be emitted ONLY on boundary transitions (1->0 and 0->1)."
+        "AtomicSafety: Subscription count mutations must execute using lock-free atomic primitives."
+    }
+
+    Model TopicCount
+    {
+        Type "Struct"
+        Members
+        {
+            "topic": "String"
+            "active_count": "Int"
+        }
+    }
+
+    @diagram(RefCounterFlow)
+    Contract incrementSubscription
+    {
+        Signature "incrementSubscription(widget_instance_id: String, topic: String)" -> "Boolean"
+
+        Requires "Topic subscription registry is active."
+
+        Ensures "Increments topic subscriber count and emits ResumeStream if count transitioned from 0 to 1."
+
+        Precondition
+        {
+            "topic is valid registered stream topic format."
+        }
+
+        Postcondition
+        {
+            "Active subscriber count increases by 1."
+        }
+
+        Process
+        {
+            1. "Fetch atomic counter for topic in DashMap."
+            2. "Fetch-and-add counter value."
+            3. "If previous count was 0, send ResumeStream RPC to publishing plugin."
+            4. "Record widget_instance_id in topic subscriber set."
+            5. "Return true."
+        }
+
+        Errors
+        {
+            "InvalidTopic"
+            "PublisherNotFound"
+        }
+    }
+
+    @diagram(RefCounterFlow)
+    Contract decrementSubscription
+    {
+        Signature "decrementSubscription(widget_instance_id: String, topic: String)" -> "Boolean"
+
+        Requires "Topic subscriber count is greater than 0."
+
+        Ensures "Decrements topic subscriber count and emits PauseStream if count drops to 0."
+
+        Precondition
+        {
+            "Current count for topic is >= 1."
+        }
+
+        Postcondition
+        {
+            "Active subscriber count decreases by 1."
+        }
+
+        Process
+        {
+            1. "Fetch atomic counter for topic in DashMap."
+            2. "Fetch-and-sub counter value."
+            3. "Remove widget_instance_id from topic subscriber set."
+            4. "If new count is 0, send PauseStream RPC to publishing plugin."
+            5. "Return true."
+        }
+
+        Errors
+        {
+            "UnderflowError"
+            "PublisherNotFound"
+        }
+    }
+
+    @diagram(RefCounterFlow)
+    Contract getSubscriberCount
+    {
+        Signature "getSubscriberCount(topic: String)" -> "TopicRefCounter::TopicCount"
+
+        Requires "Topic registry is initialized."
+
+        Ensures "Returns current active subscriber count for topic."
+
+        Precondition
+        {
+            "topic is non-empty."
+        }
+
+        Postcondition
+        {
+            "TopicCount struct contains latest atomic count."
+        }
+
+        Process
+        {
+            1. "Lookup topic in atomic registry map."
+            2. "Read current atomic value."
+            3. "Construct TopicCount struct."
+            4. "Return TopicCount."
+        }
+
+        Errors
+        {
+            "TopicNotFound"
+        }
+    }
+}
