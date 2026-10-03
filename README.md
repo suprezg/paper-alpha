@@ -6,10 +6,10 @@
     <br />
     <img src="https://img.shields.io/badge/License-AGPL_v3-blue?style=for-the-badge" alt="License">
     <img src="https://img.shields.io/badge/Rust-black?style=for-the-badge&logo=rust&logoColor=white" alt="Rust">
-    <img src="https://img.shields.io/badge/Tauri-24C8D8?style=for-the-badge&logo=tauri&logoColor=white" alt="Tauri">
-    <img src="https://img.shields.io/badge/React-20232A?style=for-the-badge&logo=react&logoColor=61DAFB" alt="React">
-    <img src="https://img.shields.io/badge/TypeScript-3178C6?style=for-the-badge&logo=typescript&logoColor=white" alt="TypeScript">
+    <img src="https://img.shields.io/badge/Slint-237346?style=for-the-badge&logoColor=white" alt="Slint Native GUI">
+    <img src="https://img.shields.io/badge/Plotters-orange?style=for-the-badge" alt="Plotters GPU/CPU">
     <img src="https://img.shields.io/badge/WebAssembly-654FF0?style=for-the-badge&logo=webassembly&logoColor=white" alt="WebAssembly">
+    <img src="https://img.shields.io/badge/gRPC-244F5D?style=for-the-badge&logo=google&logoColor=white" alt="gRPC / Protobuf">
     <br />
     <br />
     <i>A privacy-first, modular quantitative trading and market analysis workstation.</i>
@@ -29,32 +29,30 @@ To empower quantitative traders with a modular, zero-telemetry trading workstati
 ## Features
 
 ### Functional
-- **Modular Canvas Workspaces**: Drag-and-drop customizable layout grids across dedicated Analysis, Execution, and Monitoring tabs.
-- **Extensible Plugin Ecosystem**: Support for Data Feed, Data Process (Logic), and Broker execution plugins.
-- **Local Security & Credentials Vault**: Encrypted credential storage with master password protection, single-use backup recovery codes, and emergency phrase recovery.
-- **Visual Customization**: Configurable workspace themes, Tailwind color palettes, and interface presets.
-- **Data & Execution Scoping**: Tab-based widget bounds keeping market analysis and trade execution workflows focused.
+- **Dynamic Persistent Workspace Tabs**: Browser-style tab creation via a plus icon (`+`) allowing users to spawn unlimited independent workspaces, configure per-tab widget layouts from the right-side selection panel, and persist the entire workspace layout across sessions and re-logins.
+- **Two Main Plugin Pillars**: High-performance extensible architecture supporting **Data Feed Plugins** (declaring streaming vs. non-streaming emissions) and **Data Consumer Plugins** (declaring required input consumptions for quantitative calculation, charting, and execution).
+- **Local Security & Credentials Vault**: Encrypted credential storage with master password protection (Argon2id + AES-256-GCM pinned in non-swappable RAM via `mlock`), single-use emergency backup recovery codes, and 12-word mnemonic phrase recovery managed by `AuthenticationService`.
+- **Visual Customization**: Configurable workspace themes, design token adjustments, and native Slint interface styling presets.
+- **Zero-Trust Governance & Policy Enforcement**: Real-time manifest compliance monitoring via `PluginPolicyEnforcer` working alongside `RouterService` to ensure Data Feed plugins marked as streaming cannot access the Slow Speed Bus or alter undeclared variables, while Data Consumer plugins only read declared topics, never emit data, and cannot call other plugins directly.
 
 ### Non-Functional
-- **Local-First & Privacy-Focused**: Zero telemetry, tracking, or mandatory cloud connectivity. All keys and data remain on local hardware.
-- **High-Performance Architecture**: Microkernel core built with Rust and Tauri for minimal memory footprint and fast startup times.
-- **Plugin Sandboxing**: Isolated WebAssembly guest execution and local IPC sidecar subprocesses (gRPC/UDS).
-- **Style Confinement**: Web Component Shadow DOM isolation to prevent stylesheet collisions across third-party widgets.
-- **Frame-Rate Optimized UI**: Efficient rendering pipeline utilizing browser animation loops to keep dashboards responsive under data updates.
+- **Local-First & Privacy-Focused**: Zero telemetry, tracking, or mandatory cloud connectivity. All keys, databases, and trade history remain on local hardware.
+- **High-Performance Architecture**: Single-process Microkernel core built with pure Rust and the Slint native retained-mode GUI DSL, eliminating webview overhead, DOM bloat, and IPC serialization between the core and UI.
+- **Plugin Sandboxing**: Isolated WebAssembly guest execution (Wasmtime with zero-copy C-FFI byte passing) and native local IPC sidecar subprocesses (Tonic gRPC over Unix Domain Sockets or Windows Named Pipes).
+- **Declarative Schema UI Confinement**: Secure Declarative Widget Schema parsing where plugins declare JSON UI component trees (Cards, Tiles, Plotters charts, Action Forms) strictly instantiated into native Slint components, completely preventing arbitrary third-party code from executing in the GUI layer.
+- **Frame-Rate Optimized Native Graphics**: Direct GPU/CPU-accelerated rendering utilizing Slint (Skia / WGPU) and direct Plotters pixel buffers at 60 FPS, with reference-counted topic hibernation (`TopicRefCounter`) to sleep inactive tabs.
 
 ## Prerequisites
 
 ### Requirements
-- **Operating System**: Linux or Windows (10/11 64-bit).
-- **Webview Engine**:
-  - **Linux**: `WebKitGTK` (`libwebkit2gtk-4.1` / `libwebkit2gtk-4.0`).
-  - **Windows**: Microsoft Edge `WebView2` Runtime.
-- **Hardware Prerequisites**: 64-bit x86_64 or ARM64 processor, minimum 4 GB RAM (8 GB+ recommended for multi-stream analytics), and local disk storage for SQLCipher encrypted database files.
+- **Operating System**: Linux (x86_64, aarch64), Windows (10/11 64-bit), or macOS.
+- **Native Graphics Backends**: Modern GPU graphics drivers supporting OpenGL, Vulkan, or direct framebuffer rendering (Skia and WGPU backends for Slint). Webview engines and browser runtimes are entirely eliminated.
+- **Hardware Prerequisites**: 64-bit x86_64 or ARM64 processor, minimum 4 GB RAM (8 GB+ recommended for multi-stream quantitative analytics), and local disk storage for SQLCipher encrypted database files.
 
 ### Dependencies
 - **Rust Toolchain**: Rust 1.75+ (Cargo package manager).
-- **Desktop Runtime**: Tauri v2 (`@tauri-apps/cli`).
-- **Frontend Stack**: Node.js (v18+) and package manager (`pnpm` / `npm`) with React and Vite.
+- **Slint GUI & Graphics**: `slint` native UI toolkit, `slint-build`, and `plotters` charting engine.
+- **Encrypted Database Engine**: `SQLCipher` with SQLite3 and `sqlx` in WAL (Write-Ahead Logging) mode.
 - **IPC Protocol Compiler**: `protoc` (Protocol Buffers compiler) for compiling gRPC interfaces (`tonic` / `prost`).
 
 ## Getting Started
